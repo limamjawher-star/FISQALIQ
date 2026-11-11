@@ -1,0 +1,55 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@layer base {
+  :root {
+    --bg-canvas: #FFFFFF;
+    --bg-surface: #F8FAFC;
+    --bg-subtle: #F1F5F9;
+    --text-primary: #172033;
+    --text-secondary: #64748B;
+    --border-color: #E8EDF2;
+    --accent-emerald: #10B981;
+    --accent-emerald-soft: #ECFDF5;
+  }
+
+  body {
+    background-color: #FFFFFF;
+    color: #172033;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: var(--font-display), sans-serif;
+    letter-spacing: -0.02em;
+    color: #172033;
+  }
+
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="password"],
+  select,
+  textarea {
+    transition: border-color 140ms ease, box-shadow 140ms ease;
+    border-color: #E2E8F0;
+    color: #172033;
+    background-color: #FFFFFF;
+  }
+
+  input[type="text"]:focus,
+  input[type="number"]:focus,
+  input[type="email"]:focus,
+  input[type="password"]:focus,
+  select:focus,
+  textarea:focus {
+    outline: none;
+    border-color: #10B981;
+    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.15);
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}

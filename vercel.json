@@ -1,0 +1,28 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "regions": ["cdg1"],
+  "functions": {
+    "app/api/tax-assistant/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/ai/assistant/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/ai/knowledge-base/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/reports/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/reports/download/route.ts": {
+      "maxDuration": 15
+    },
+    "app/api/calculations/route.ts": {
+      "maxDuration": 15
+    },
+    "app/api/security-audit/route.ts": {
+      "maxDuration": 15
+    }
+  }
+}

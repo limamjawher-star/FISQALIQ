@@ -1,0 +1,6 @@
+{
+  "name": "FISCALIQ",
+  "description": "Vos impôts, enfin compréhensibles. Plateforme française d'intelligence fiscale pour les particuliers et les foyers : simulateur d'impôt sur le revenu, salaire brut/net après prélèvement à la source, réductions et crédits d'impôt légaux.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

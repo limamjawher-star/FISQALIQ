@@ -1,36 +1,25 @@
 'use client';
 
-import React, { createContext, useContext, useState, useMemo } from 'react';
-import {
-  DEMO_COMPANIES,
-  DEMO_EMPLOYEES,
-  DemoCompanyProfile,
-  DemoEmployeeRecord,
-  LEGAL_TAX_OPTIMIZATION_LEVERS,
-  LegalTaxLever,
-  REGULATORY_DEADLINES_DEMO,
-  RegulatoryDeadline,
-  INITIAL_SAVED_CALCULATIONS,
-  SavedCalculationRecord,
-  INITIAL_DASHBOARD_ACTIVITIES,
-  DashboardActivityRecord,
-} from '@/lib/data/demo-dataset';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useMemo,
+  useCallback,
+  useEffect,
+} from 'react';
+import { DashboardActivityRecord } from '@/lib/data/demo-dataset';
 import {
   DEMO_PERSONAL_HOUSEHOLDS,
+  EMPTY_USER_HOUSEHOLD,
+  USER_HOUSEHOLD_ID,
   PersonalHouseholdProfile,
   PERSONAL_TAX_OPPORTUNITIES,
   PersonalTaxAdvantageOpportunity,
   PERSONAL_TAX_CALENDAR_2026,
   PersonalTaxCalendarItem,
-  INITIAL_SAVED_PERSONAL_SIMULATIONS,
   SavedPersonalSimulation,
 } from '@/lib/data/personal-tax-dataset';
-import {
-  calculateCorporateTax,
-  calculateProfitabilityMetrics,
-  CorporateTaxResult,
-  ProfitabilityResult,
-} from '@/lib/calculations/engine';
 import {
   calculatePersonalIncomeTax,
   calculatePersonalSalaryToNetAfterTax,
@@ -38,6 +27,9 @@ import {
   PersonalSalarySimulatorResult,
 } from '@/lib/calculations/personal-tax-engine';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
+
+const STORAGE_KEY_USER_PROFILE = 'fiscaliq_user_household_v1';
+const STORAGE_KEY_SAVED_SIMULATIONS = 'fiscaliq_saved_simulations_v1';
 
 export interface ToastItem {
   id: string;
@@ -47,13 +39,24 @@ export interface ToastItem {
 }
 
 interface FiscaliqContextValue {
-  // Personal & Household Tax Intelligence State (Primary Product Direction)
+  // User profile & Demo household state
+  userHousehold: PersonalHouseholdProfile;
+  demoHouseholds: PersonalHouseholdProfile[];
   households: PersonalHouseholdProfile[];
   activeHousehold: PersonalHouseholdProfile;
+  isViewingDemo: boolean;
   selectHouseholdById: (id: string) => void;
+  loadDemoHousehold: (demoId?: string) => void;
+  exitDemoMode: () => void;
+  saveUserProfile: (patch: Partial<PersonalHouseholdProfile>) => void;
   updateActiveHousehold: (patch: Partial<PersonalHouseholdProfile>) => void;
+  clearUserData: () => void;
+
+  // Calculated summaries
   personalTaxSummary: PersonalIncomeTaxResult;
   personalSalarySummary: PersonalSalarySimulatorResult;
+
+  // Opportunities, calendar, simulations, activity
   personalOpportunities: PersonalTaxAdvantageOpportunity[];
   togglePersonalOpportunityStatus: (
     id: string,
@@ -70,32 +73,13 @@ interface FiscaliqContextValue {
   ) => void;
   deletePersonalSimulation: (id: string) => void;
   restoreDefaultPersonalSimulations: () => void;
+  activityLog: DashboardActivityRecord[];
+  logActivity: (entry: Omit<DashboardActivityRecord, 'id' | 'timestamp'>) => void;
 
   // Global Toast Notifications
   toasts: ToastItem[];
   pushToast: (toast: Omit<ToastItem, 'id'>) => void;
   dismissToast: (id: string) => void;
-
-  // Legacy / Remaining Stage-by-Stage Compatibility State
-  companies: DemoCompanyProfile[];
-  activeCompany: DemoCompanyProfile;
-  selectCompanyById: (id: string) => void;
-  updateActiveCompany: (patch: Partial<DemoCompanyProfile>) => void;
-  employees: DemoEmployeeRecord[];
-  addEmployee: (emp: Omit<DemoEmployeeRecord, 'id'>) => void;
-  removeEmployee: (id: string) => void;
-  taxLevers: LegalTaxLever[];
-  toggleTaxLeverStatus: (id: string, status: LegalTaxLever['status']) => void;
-  deadlines: RegulatoryDeadline[];
-  updateDeadlineStatus: (id: string, status: RegulatoryDeadline['status']) => void;
-  savedCalculations: SavedCalculationRecord[];
-  saveCalculation: (calc: Omit<SavedCalculationRecord, 'id' | 'createdAt'>) => void;
-  deleteSavedCalculation: (id: string) => void;
-  restoreDefaultSavedCalculations: () => void;
-  activityLog: DashboardActivityRecord[];
-  logActivity: (entry: Omit<DashboardActivityRecord, 'id' | 'timestamp'>) => void;
-  corporateTaxSummary: CorporateTaxResult;
-  profitabilitySummary: ProfitabilityResult;
 }
 
 const FiscaliqContext = createContext<FiscaliqContextValue | null>(null);
@@ -109,12 +93,30 @@ function formatNowTimestamp(): string {
 }
 
 export function FiscaliqProvider({ children }: { children: React.ReactNode }) {
-  // Primary Personal Tax State
-  const [households, setHouseholds] = useState<PersonalHouseholdProfile[]>(
-    DEMO_PERSONAL_HOUSEHOLDS
-  );
+  // 1. New visitors start with an EMPTY user profile (or persisted localStorage profile)
+  const [userHousehold, setUserHousehold] = useState<PersonalHouseholdProfile>(() => {
+    if (typeof window === 'undefined') return EMPTY_USER_HOUSEHOLD;
+    try {
+      const rawProfile = window.localStorage.getItem(STORAGE_KEY_USER_PROFILE);
+      if (rawProfile) {
+        const parsed = JSON.parse(rawProfile) as Partial<PersonalHouseholdProfile>;
+        if (parsed && typeof parsed === 'object') {
+          return {
+            ...EMPTY_USER_HOUSEHOLD,
+            ...parsed,
+            id: USER_HOUSEHOLD_ID,
+            isDemoData: false,
+          };
+        }
+      }
+    } catch {
+      // Ignore storage read errors
+    }
+    return EMPTY_USER_HOUSEHOLD;
+  });
+
   const [activeHouseholdId, setActiveHouseholdId] = useState<string>(
-    DEMO_PERSONAL_HOUSEHOLDS[0].id
+    USER_HOUSEHOLD_ID
   );
   const [personalOpportunities, setPersonalOpportunities] = useState<
     PersonalTaxAdvantageOpportunity[]
@@ -124,235 +126,280 @@ export function FiscaliqProvider({ children }: { children: React.ReactNode }) {
   );
   const [savedPersonalSimulations, setSavedPersonalSimulations] = useState<
     SavedPersonalSimulation[]
-  >(INITIAL_SAVED_PERSONAL_SIMULATIONS);
+  >(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const rawSims = window.localStorage.getItem(STORAGE_KEY_SAVED_SIMULATIONS);
+      if (rawSims) {
+        const parsedSims = JSON.parse(rawSims);
+        if (Array.isArray(parsedSims)) {
+          return parsedSims;
+        }
+      }
+    } catch {
+      // Ignore storage read errors
+    }
+    return [];
+  });
+  const [activityLog, setActivityLog] = useState<DashboardActivityRecord[]>([]);
 
   // Toast State
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  const dismissToast = (id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  };
+  // Persist userHousehold changes to localStorage
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEY_USER_PROFILE,
+        JSON.stringify(userHousehold)
+      );
+    } catch {
+      // Ignore storage write errors
+    }
+  }, [userHousehold]);
 
-  const pushToast = (toast: Omit<ToastItem, 'id'>) => {
+  // Persist savedPersonalSimulations changes to localStorage
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEY_SAVED_SIMULATIONS,
+        JSON.stringify(savedPersonalSimulations)
+      );
+    } catch {
+      // Ignore storage write errors
+    }
+  }, [savedPersonalSimulations]);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const pushToast = useCallback((toast: Omit<ToastItem, 'id'>) => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     setToasts((prev) => [...prev.slice(-2), { ...toast, id }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 4200);
-  };
+  }, []);
 
-  // Legacy B2B State (preserved so remaining secondary routes do not break before their replacement stage)
-  const [companies, setCompanies] = useState<DemoCompanyProfile[]>(DEMO_COMPANIES);
-  const [activeCompanyId, setActiveCompanyId] = useState<string>(DEMO_COMPANIES[0].id);
-  const [employees, setEmployees] = useState<DemoEmployeeRecord[]>(DEMO_EMPLOYEES);
-  const [taxLevers, setTaxLevers] = useState<LegalTaxLever[]>(LEGAL_TAX_OPTIMIZATION_LEVERS);
-  const [deadlines, setDeadlines] = useState<RegulatoryDeadline[]>(REGULATORY_DEADLINES_DEMO);
-  const [savedCalculations, setSavedCalculations] = useState<SavedCalculationRecord[]>(
-    INITIAL_SAVED_CALCULATIONS
+  const logActivity = useCallback(
+    (entry: Omit<DashboardActivityRecord, 'id' | 'timestamp'>) => {
+      const record: DashboardActivityRecord = {
+        ...entry,
+        id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: formatNowTimestamp(),
+      };
+      setActivityLog((prev) => [record, ...prev]);
+    },
+    []
   );
-  const [activityLog, setActivityLog] = useState<DashboardActivityRecord[]>([
-    {
-      id: 'act-perso-01',
-      companyId: 'foyer-couple-2-enfants',
-      timestamp: '08/11/2026 · 09:20',
-      category: 'simulation',
-      title: 'Estimation d’impôt sur le revenu 2026 calculée (3 parts)',
-      detail: 'Impôt net annuel calculé selon le barème progressif 2026 après crédit d’impôt garde d’enfant (Tranche marginale 11 %).',
-      actor: 'Simulateur IR 2026 (Barème officiel)',
-      classification: 'CALCUL_VERIFIE',
-    },
-    {
-      id: 'act-perso-02',
-      companyId: 'foyer-couple-2-enfants',
-      timestamp: '07/11/2026 · 18:15',
-      category: 'optimisation',
-      title: 'Crédit d’impôt garde d’enfant (< 6 ans) vérifié',
-      detail: '50 % des dépenses prises en compte (plafond légal de 3 500 € par enfant, CGI Art. 200 quater B).',
-      actor: 'Découverte des aides & réductions',
-      classification: 'CALCUL_VERIFIE',
-    },
-    {
-      id: 'act-perso-03',
-      companyId: 'foyer-couple-2-enfants',
-      timestamp: '06/11/2026 · 14:10',
-      category: 'conformite',
-      title: 'Avance de 60 % des crédits d’impôt (Janvier 2026) marquée comme reçue',
-      detail: 'Virement automatique DGFiP sur le compte bancaire du foyer.',
-      actor: 'Calendrier fiscal particulier',
-      classification: 'DONNEE_FICTIVE_DEMO',
-    },
-    {
-      id: 'act-perso-04',
-      companyId: 'foyer-couple-2-enfants',
-      timestamp: '05/11/2026 · 11:05',
-      category: 'simulation',
-      title: 'Comparaison Abattement 10 % vs Frais réels effectuée',
-      detail: 'Vérification automatique du plafond et du plancher de la déduction de 10 % (CGI Art. 83-3°).',
-      actor: 'Compagnon déclaratif',
-      classification: 'CALCUL_VERIFIE',
-    },
-  ]);
+
+  const households = useMemo(
+    () => [userHousehold, ...DEMO_PERSONAL_HOUSEHOLDS],
+    [userHousehold]
+  );
 
   const activeHousehold = useMemo(() => {
-    return households.find((h) => h.id === activeHouseholdId) || households[0];
-  }, [households, activeHouseholdId]);
-
-  const activeCompany = useMemo(() => {
-    return companies.find((c) => c.id === activeCompanyId) || companies[0];
-  }, [companies, activeCompanyId]);
-
-  const logActivity = (entry: Omit<DashboardActivityRecord, 'id' | 'timestamp'>) => {
-    const record: DashboardActivityRecord = {
-      ...entry,
-      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      timestamp: formatNowTimestamp(),
-    };
-    setActivityLog((prev) => [record, ...prev]);
-  };
-
-  // Personal Household Actions
-  const selectHouseholdById = (id: string) => {
-    setActiveHouseholdId(id);
-    const target = households.find((h) => h.id === id);
-    if (target) {
-      logActivity({
-        companyId: target.id,
-        category: 'dossier',
-        title: `Profil de foyer sélectionné : ${target.householdName}`,
-        detail: `${target.situationSummary} · Revenu déclaré ${target.annualDeclaredSalaryNetImposableEur.toLocaleString('fr-FR')} €/an.`,
-        actor: 'Sélecteur de situation personnelle',
-        classification: 'DONNEE_FICTIVE_DEMO',
-      });
-      pushToast({
-        variant: 'info',
-        title: `Foyer actif : ${target.householdName.split('(')[0].trim()}`,
-        message: `Calculs mis à jour (${target.annualDeclaredSalaryNetImposableEur.toLocaleString('fr-FR')} € de revenu déclaré).`,
-      });
+    if (activeHouseholdId === USER_HOUSEHOLD_ID) {
+      return userHousehold;
     }
-  };
-
-  const updateActiveHousehold = (patch: Partial<PersonalHouseholdProfile>) => {
-    setHouseholds((prev) =>
-      prev.map((h) => (h.id === activeHousehold.id ? { ...h, ...patch } : h))
+    return (
+      DEMO_PERSONAL_HOUSEHOLDS.find((h) => h.id === activeHouseholdId) ||
+      userHousehold
     );
-    logActivity({
-      companyId: activeHousehold.id,
-      category: 'dossier',
-      title: 'Situation personnelle mise à jour',
-      detail: `Recalcul immédiat de l’impôt sur le revenu et du quotient familial pour ${activeHousehold.householdName}.`,
-      actor: 'Mon profil fiscal',
-      classification: 'ESTIMATION',
-    });
+  }, [activeHouseholdId, userHousehold]);
+
+  const isViewingDemo = activeHousehold.id !== USER_HOUSEHOLD_ID;
+
+  const selectHouseholdById = useCallback(
+    (id: string) => {
+      setActiveHouseholdId(id);
+      if (id === USER_HOUSEHOLD_ID) {
+        pushToast({
+          variant: 'info',
+          title: 'Mon profil actif',
+          message: 'Vous consultez votre propre profil fiscal.',
+        });
+        return;
+      }
+      const target = DEMO_PERSONAL_HOUSEHOLDS.find((h) => h.id === id);
+      if (target) {
+        pushToast({
+          variant: 'info',
+          title: `Exemple actif : ${target.householdName.split('(')[0].trim()}`,
+          message: `Exemple fictif chargé (${target.annualDeclaredSalaryNetImposableEur.toLocaleString('fr-FR')} € / an).`,
+        });
+      }
+    },
+    [pushToast]
+  );
+
+  const loadDemoHousehold = useCallback(
+    (demoId?: string) => {
+      const targetId = demoId || DEMO_PERSONAL_HOUSEHOLDS[0].id;
+      selectHouseholdById(targetId);
+    },
+    [selectHouseholdById]
+  );
+
+  const exitDemoMode = useCallback(() => {
+    setActiveHouseholdId(USER_HOUSEHOLD_ID);
     pushToast({
-      variant: 'success',
-      title: 'Profil fiscal mis à jour',
-      message: 'Votre impôt annuel, votre quotient familial et votre taux de PAS ont été recalculés.',
+      variant: 'info',
+      title: 'Retour à votre profil',
+      message: 'L’exemple de démonstration a été fermé.',
     });
-  };
+  }, [pushToast]);
 
-  const togglePersonalOpportunityStatus = (
-    id: string,
-    status: PersonalTaxAdvantageOpportunity['status']
-  ) => {
-    const target = personalOpportunities.find((o) => o.id === id);
-    setPersonalOpportunities((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, status } : item))
-    );
-    if (target) {
-      const label =
-        status === 'deja_applique'
-          ? 'Appliqué à ma simulation'
-          : status === 'eligible_a_verifier'
-          ? 'Éligibilité à vérifier'
-          : 'Non concerné';
+  // Always updates the user's own profile (never overwrites a demo household)
+  const saveUserProfile = useCallback(
+    (patch: Partial<PersonalHouseholdProfile>) => {
+      setUserHousehold((prev) => ({
+        ...prev,
+        ...patch,
+        id: USER_HOUSEHOLD_ID,
+        isDemoData: false,
+      }));
+      setActiveHouseholdId(USER_HOUSEHOLD_ID);
       logActivity({
-        companyId: activeHousehold.id,
-        category: 'optimisation',
-        title: `Avantage fiscal mis à jour : ${label}`,
-        detail: `${target.title} (${target.statutoryReference}).`,
-        actor: 'Découverte des réductions & crédits d’impôt',
+        companyId: USER_HOUSEHOLD_ID,
+        category: 'dossier',
+        title: 'Profil fiscal personnel enregistré',
+        detail: 'Calculs d’impôt et de parts fiscales mis à jour.',
+        actor: 'Mon profil fiscal',
         classification: 'ESTIMATION',
       });
       pushToast({
         variant: 'success',
-        title: label,
-        message: target.title,
+        title: 'Profil fiscal enregistré',
+        message: 'Vos données sont sauvegardées sur cet appareil.',
       });
+    },
+    [logActivity, pushToast]
+  );
+
+  const updateActiveHousehold = useCallback(
+    (patch: Partial<PersonalHouseholdProfile>) => {
+      saveUserProfile(patch);
+    },
+    [saveUserProfile]
+  );
+
+  const clearUserData = useCallback(() => {
+    setUserHousehold(EMPTY_USER_HOUSEHOLD);
+    setSavedPersonalSimulations([]);
+    setActivityLog([]);
+    setActiveHouseholdId(USER_HOUSEHOLD_ID);
+    try {
+      window.localStorage.removeItem(STORAGE_KEY_USER_PROFILE);
+      window.localStorage.removeItem(STORAGE_KEY_SAVED_SIMULATIONS);
+    } catch {
+      // Ignore storage errors
     }
-  };
-
-  const updatePersonalCalendarStatus = (
-    id: string,
-    status: PersonalTaxCalendarItem['status']
-  ) => {
-    const target = personalCalendar.find((c) => c.id === id);
-    setPersonalCalendar((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, status } : item))
-    );
-    if (target) {
-      const label =
-        status === 'effectue'
-          ? 'Effectué'
-          : status === 'a_preparer'
-          ? 'À préparer'
-          : 'À vérifier';
-      logActivity({
-        companyId: activeHousehold.id,
-        category: 'conformite',
-        title: `Étape du calendrier fiscal : ${label}`,
-        detail: `${target.title} (${target.periodLabel}).`,
-        actor: 'Calendrier de déclaration',
-        classification: 'DONNEE_FICTIVE_DEMO',
-      });
-      pushToast({
-        variant: 'info',
-        title: `Échéance marquée « ${label} »`,
-        message: `${target.title} (${target.periodLabel})`,
-      });
-    }
-  };
-
-  const savePersonalSimulation = (
-    sim: Omit<SavedPersonalSimulation, 'id' | 'createdAt'>
-  ) => {
-    const newSim: SavedPersonalSimulation = {
-      ...sim,
-      id: `sim-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      createdAt: formatNowTimestamp(),
-    };
-    setSavedPersonalSimulations((prev) => [newSim, ...prev]);
-    logActivity({
-      companyId: sim.householdId,
-      category: 'simulation',
-      title: `Simulation personnelle sauvegardée : ${sim.title}`,
-      detail: `${sim.mainResultLabel} : ${sim.mainResultAmountEur.toLocaleString('fr-FR')} € (${sim.statutoryRef}).`,
-      actor: 'Calculateur IR déterministe',
-      classification: sim.classification,
-    });
-    pushToast({
-      variant: 'success',
-      title: 'Simulation sauvegardée',
-      message: `${sim.title} (${sim.mainResultAmountEur.toLocaleString('fr-FR')} €)`,
-    });
-  };
-
-  const deletePersonalSimulation = (id: string) => {
-    setSavedPersonalSimulations((prev) => prev.filter((s) => s.id !== id));
     pushToast({
       variant: 'info',
-      title: 'Simulation supprimée',
-      message: 'La simulation a été retirée de votre historique.',
+      title: 'Données effacées',
+      message: 'Votre profil et vos simulations sauvegardées ont été réinitialisés.',
     });
-  };
+  }, [pushToast]);
 
-  const restoreDefaultPersonalSimulations = () => {
-    setSavedPersonalSimulations(INITIAL_SAVED_PERSONAL_SIMULATIONS);
+  const togglePersonalOpportunityStatus = useCallback(
+    (id: string, status: PersonalTaxAdvantageOpportunity['status']) => {
+      setPersonalOpportunities((prev) => {
+        const target = prev.find((o) => o.id === id);
+        if (target) {
+          const label =
+            status === 'deja_applique'
+              ? 'Appliqué à ma simulation'
+              : status === 'eligible_a_verifier'
+              ? 'Éligibilité à vérifier'
+              : 'Non concerné';
+          pushToast({
+            variant: 'success',
+            title: label,
+            message: target.title,
+          });
+        }
+        return prev.map((item) => (item.id === id ? { ...item, status } : item));
+      });
+    },
+    [pushToast]
+  );
+
+  const updatePersonalCalendarStatus = useCallback(
+    (id: string, status: PersonalTaxCalendarItem['status']) => {
+      setPersonalCalendar((prev) => {
+        const target = prev.find((c) => c.id === id);
+        if (target) {
+          const label =
+            status === 'effectue'
+              ? 'Effectué'
+              : status === 'a_preparer'
+              ? 'À préparer'
+              : 'À vérifier';
+          pushToast({
+            variant: 'info',
+            title: `Échéance marquée « ${label} »`,
+            message: `${target.title} (${target.periodLabel})`,
+          });
+        }
+        return prev.map((item) => (item.id === id ? { ...item, status } : item));
+      });
+    },
+    [pushToast]
+  );
+
+  const savePersonalSimulation = useCallback(
+    (sim: Omit<SavedPersonalSimulation, 'id' | 'createdAt'>) => {
+      const newSim: SavedPersonalSimulation = {
+        ...sim,
+        householdId: USER_HOUSEHOLD_ID,
+        id: `sim-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        createdAt: formatNowTimestamp(),
+      };
+      setSavedPersonalSimulations((prev) => [newSim, ...prev]);
+      logActivity({
+        companyId: USER_HOUSEHOLD_ID,
+        category: 'simulation',
+        title: `Simulation sauvegardée : ${sim.title}`,
+        detail: `${sim.mainResultLabel} : ${sim.mainResultAmountEur.toLocaleString('fr-FR')} €.`,
+        actor: 'Calculateur IR',
+        classification: sim.classification,
+      });
+      pushToast({
+        variant: 'success',
+        title: 'Simulation sauvegardée',
+        message: `${sim.title} (${sim.mainResultAmountEur.toLocaleString('fr-FR')} €)`,
+      });
+    },
+    [logActivity, pushToast]
+  );
+
+  const deletePersonalSimulation = useCallback(
+    (id: string) => {
+      setSavedPersonalSimulations((prev) => prev.filter((s) => s.id !== id));
+      pushToast({
+        variant: 'info',
+        title: 'Simulation supprimée',
+        message: 'La simulation a été retirée de votre historique.',
+      });
+    },
+    [pushToast]
+  );
+
+  const restoreDefaultPersonalSimulations = useCallback(() => {
+    setSavedPersonalSimulations([]);
+    try {
+      window.localStorage.removeItem(STORAGE_KEY_SAVED_SIMULATIONS);
+    } catch {
+      // Ignore storage errors
+    }
     pushToast({
-      variant: 'success',
-      title: 'Simulations restaurées',
-      message: 'Les scénarios de référence ont été rechargés.',
+      variant: 'info',
+      title: 'Historique vidé',
+      message: 'Vos simulations sauvegardées ont été effacées.',
     });
-  };
+  }, [pushToast]);
 
   const personalTaxSummary = useMemo(() => {
     return calculatePersonalIncomeTax({
@@ -376,124 +423,67 @@ export function FiscaliqProvider({ children }: { children: React.ReactNode }) {
     });
   }, [activeHousehold]);
 
-  // Legacy B2B Actions
-  const selectCompanyById = (id: string) => {
-    setActiveCompanyId(id);
-  };
-
-  const updateActiveCompany = (patch: Partial<DemoCompanyProfile>) => {
-    setCompanies((prev) =>
-      prev.map((c) => (c.id === activeCompany.id ? { ...c, ...patch } : c))
-    );
-  };
-
-  const addEmployee = (emp: Omit<DemoEmployeeRecord, 'id'>) => {
-    const newEmp: DemoEmployeeRecord = {
-      ...emp,
-      id: `emp-${Date.now()}`,
-    };
-    setEmployees((prev) => [newEmp, ...prev]);
-  };
-
-  const removeEmployee = (id: string) => {
-    setEmployees((prev) => prev.filter((e) => e.id !== id));
-  };
-
-  const toggleTaxLeverStatus = (id: string, status: LegalTaxLever['status']) => {
-    setTaxLevers((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, status } : item))
-    );
-  };
-
-  const updateDeadlineStatus = (id: string, status: RegulatoryDeadline['status']) => {
-    setDeadlines((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, status } : d))
-    );
-  };
-
-  const saveCalculation = (calc: Omit<SavedCalculationRecord, 'id' | 'createdAt'>) => {
-    const newRecord: SavedCalculationRecord = {
-      ...calc,
-      id: `calc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      createdAt: formatNowTimestamp(),
-    };
-    setSavedCalculations((prev) => [newRecord, ...prev]);
-  };
-
-  const deleteSavedCalculation = (id: string) => {
-    setSavedCalculations((prev) => prev.filter((c) => c.id !== id));
-  };
-
-  const restoreDefaultSavedCalculations = () => {
-    setSavedCalculations(INITIAL_SAVED_CALCULATIONS);
-  };
-
-  const corporateTaxSummary = useMemo(() => {
-    return calculateCorporateTax({
-      annualTurnoverHt: activeCompany.annualTurnoverHt,
-      taxableProfit: activeCompany.taxableProfitEstimate,
-      isCapitalFullyPaidUp: activeCompany.isCapitalFullyPaidUp,
-      physicalPersonOwnershipShare: activeCompany.physicalPersonOwnershipShare / 100,
-    });
-  }, [activeCompany]);
-
-  const profitabilitySummary = useMemo(() => {
-    return calculateProfitabilityMetrics({
-      annualRevenueHt: activeCompany.annualTurnoverHt,
-      variableCostsHt: activeCompany.variableCostsHt,
-      fixedExternalExpensesHt: activeCompany.fixedExternalExpensesHt,
-      operatingTaxesHt: activeCompany.operatingTaxesHt,
-      totalPayrollCost: activeCompany.totalPayrollCost,
-      depreciationAndAmortization: activeCompany.depreciationAndAmortization,
-      isPmeReducedRateEligible: corporateTaxSummary.isEligibleForPmeReducedRate,
-    });
-  }, [activeCompany, corporateTaxSummary.isEligibleForPmeReducedRate]);
-
-  const value: FiscaliqContextValue = {
-    households,
-    activeHousehold,
-    selectHouseholdById,
-    updateActiveHousehold,
-    personalTaxSummary,
-    personalSalarySummary,
-    personalOpportunities,
-    togglePersonalOpportunityStatus,
-    personalCalendar,
-    updatePersonalCalendarStatus,
-    savedPersonalSimulations,
-    savePersonalSimulation,
-    deletePersonalSimulation,
-    restoreDefaultPersonalSimulations,
-
-    toasts,
-    pushToast,
-    dismissToast,
-
-    companies,
-    activeCompany,
-    selectCompanyById,
-    updateActiveCompany,
-    employees,
-    addEmployee,
-    removeEmployee,
-    taxLevers,
-    toggleTaxLeverStatus,
-    deadlines,
-    updateDeadlineStatus,
-    savedCalculations,
-    saveCalculation,
-    deleteSavedCalculation,
-    restoreDefaultSavedCalculations,
-    activityLog,
-    logActivity,
-    corporateTaxSummary,
-    profitabilitySummary,
-  };
+  const value = useMemo<FiscaliqContextValue>(
+    () => ({
+      userHousehold,
+      demoHouseholds: DEMO_PERSONAL_HOUSEHOLDS,
+      households,
+      activeHousehold,
+      isViewingDemo,
+      selectHouseholdById,
+      loadDemoHousehold,
+      exitDemoMode,
+      saveUserProfile,
+      updateActiveHousehold,
+      clearUserData,
+      personalTaxSummary,
+      personalSalarySummary,
+      personalOpportunities,
+      togglePersonalOpportunityStatus,
+      personalCalendar,
+      updatePersonalCalendarStatus,
+      savedPersonalSimulations,
+      savePersonalSimulation,
+      deletePersonalSimulation,
+      restoreDefaultPersonalSimulations,
+      activityLog,
+      logActivity,
+      toasts,
+      pushToast,
+      dismissToast,
+    }),
+    [
+      userHousehold,
+      households,
+      activeHousehold,
+      isViewingDemo,
+      selectHouseholdById,
+      loadDemoHousehold,
+      exitDemoMode,
+      saveUserProfile,
+      updateActiveHousehold,
+      clearUserData,
+      personalTaxSummary,
+      personalSalarySummary,
+      personalOpportunities,
+      togglePersonalOpportunityStatus,
+      personalCalendar,
+      updatePersonalCalendarStatus,
+      savedPersonalSimulations,
+      savePersonalSimulation,
+      deletePersonalSimulation,
+      restoreDefaultPersonalSimulations,
+      activityLog,
+      logActivity,
+      toasts,
+      pushToast,
+      dismissToast,
+    ]
+  );
 
   return (
     <FiscaliqContext.Provider value={value}>
       {children}
-      {/* Global Toast Notification Stack */}
       {toasts.length > 0 && (
         <div
           aria-live="polite"
@@ -542,6 +532,3 @@ export function useFiscaliq() {
   }
   return ctx;
 }
-
-
-

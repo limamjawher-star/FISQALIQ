@@ -1,9 +1,22 @@
 import type {NextConfig} from 'next';
 
+const cspHeader = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "img-src 'self' blob: data: https:",
+  "font-src 'self' data: https://fonts.gstatic.com",
+  "connect-src 'self' ws: wss: https: http:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors *",
+].join('; ');
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   eslint: {
-    ignoreDuringBuilds: true,
+    ignoreDuringBuilds: false,
   },
   typescript: {
     ignoreBuildErrors: false,
@@ -34,11 +47,39 @@ const nextConfig: NextConfig = {
   },
   output: 'standalone',
   transpilePackages: ['motion'],
+  async redirects() {
+    return [
+      {
+        source: '/profitability',
+        destination: '/declaration',
+        permanent: true,
+      },
+      {
+        source: '/compliance',
+        destination: '/echeances',
+        permanent: true,
+      },
+      {
+        source: '/login',
+        destination: '/onboarding',
+        permanent: false,
+      },
+      {
+        source: '/signup',
+        destination: '/onboarding',
+        permanent: false,
+      },
+    ];
+  },
   async headers() {
     return [
       {
         source: '/(.*)',
         headers: [
+          {
+            key: 'Content-Security-Policy',
+            value: cspHeader,
+          },
           {
             key: 'X-Content-Type-Options',
             value: 'nosniff',

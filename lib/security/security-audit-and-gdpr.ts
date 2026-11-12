@@ -16,6 +16,10 @@
 
 import { NextRequest } from 'next/server';
 import { OfficialPersonalTaxDocument } from '@/lib/ai/knowledge-base';
+import {
+  checkAndIncrementRateLimitSync,
+  getSharedStoreBackend,
+} from '@/lib/security/shared-store';
 
 // ============================================================================
 // 1. DOMAINES OFFICIELS AUTORISÉS (ANTI-FABRICATION DE CITATIONS & ANTI-SSRF/XSS)
@@ -283,14 +287,6 @@ export const API_RATE_LIMIT_POLICIES: Record<ApiEndpointCategory, RateLimitPolic
   GDPR_PRIVACY_RIGHTS: { windowMs: 60_000, maxRequests: 15 },
 };
 
-const globalForRateLimits = globalThis as unknown as {
-  __fiscaliqUnifiedRateLimitStore?: Map<string, number[]>;
-};
-
-const unifiedRateLimitStore =
-  globalForRateLimits.__fiscaliqUnifiedRateLimitStore ??
-  (globalForRateLimits.__fiscaliqUnifiedRateLimitStore = new Map<string, number[]>());
-
 export function enforceApiRateLimit(params: {
   category: ApiEndpointCategory;
   clientIdentifier: string;
@@ -303,35 +299,12 @@ export function enforceApiRateLimit(params: {
   const { category, clientIdentifier } = params;
   const policy = API_RATE_LIMIT_POLICIES[category];
   const key = `${category}:${clientIdentifier}`;
-  const now = Date.now();
 
-  const existing = unifiedRateLimitStore.get(key) ?? [];
-  const validTimestamps = existing.filter((ts) => now - ts < policy.windowMs);
-
-  if (validTimestamps.length >= policy.maxRequests) {
-    const oldest = validTimestamps[0] ?? now;
-    const resetInSeconds = Math.max(
-      1,
-      Math.ceil((policy.windowMs - (now - oldest)) / 1000)
-    );
-    unifiedRateLimitStore.set(key, validTimestamps);
-    return {
-      allowed: false,
-      remaining: 0,
-      limit: policy.maxRequests,
-      resetInSeconds,
-    };
-  }
-
-  validTimestamps.push(now);
-  unifiedRateLimitStore.set(key, validTimestamps);
-
-  return {
-    allowed: true,
-    remaining: Math.max(0, policy.maxRequests - validTimestamps.length),
-    limit: policy.maxRequests,
-    resetInSeconds: Math.ceil(policy.windowMs / 1000),
-  };
+  return checkAndIncrementRateLimitSync({
+    key,
+    windowMs: policy.windowMs,
+    maxRequests: policy.maxRequests,
+  });
 }
 
 export function extractClientIdentifier(req: NextRequest, householdId?: string): string {
@@ -465,14 +438,17 @@ export const SECURITY_AUDIT_FINDINGS_REGISTRY: SecurityAuditFinding[] = [
     severity: 'CRITICAL',
     category: 'ISOLATION_DONNEES_FOYER',
     titleFr:
-      'Obligation stricte de concordance entre l’identifiant de session authentifié et le profil fiscal transmis à l’Assistant IA',
+      'Dérivation de l’identité du foyer exclusivement depuis une session serveur vérifiée (refus des en-têtes et identifiants non vérifiés)',
     descriptionFr:
-      'Avant correction, si un appel API à /api/tax-assistant ou /api/ai/assistant omettait le champ `authorizedHouseholdId` tout en fournissant un objet `householdContext`, la fonction `resolveAuthorizedHouseholdSnapshot` pouvait accepter le contexte sans preuve de concordance avec l’en-tête d’authentification.',
+      'Les routes API ne doivent jamais faire confiance à l’en-tête `x-authenticated-household-id` ni aux identifiants transmis dans le corps de la requête (`authenticatedHouseholdId`, `targetHouseholdId`).',
     status: 'REMEDIATED_VERIFIED',
     remediationAppliedFr:
-      'Correction appliquée : `resolveAuthorizedHouseholdSnapshot` exige désormais que `authorizedHouseholdId` soit non vide et strictement égal à `householdContext.householdId`, et les routes `/api/tax-assistant` et `/api/ai/assistant` bloquent avec un code HTTP 403 toute divergence avec l’en-tête `x-authenticated-household-id`.',
+      'Correction appliquée : `resolveVerifiedHouseholdSession` dérive le foyer depuis un jeton ou cookie de session signé HMAC-SHA256 côté serveur et rejette avec HTTP 403 toute divergence avec la cible demandée.',
     affectedFiles: [
-      'lib/ai/gemini-service.ts',
+      'lib/security/session-auth.ts',
+      'app/api/reports/route.ts',
+      'app/api/reports/download/route.ts',
+      'app/api/security-audit/route.ts',
       'app/api/tax-assistant/route.ts',
       'app/api/ai/assistant/route.ts',
     ],
@@ -482,16 +458,15 @@ export const SECURITY_AUDIT_FINDINGS_REGISTRY: SecurityAuditFinding[] = [
     severity: 'HIGH',
     category: 'AUTHENTIFICATION_ET_AUTORISATION',
     titleFr:
-      'Protection des actions d’administration de la base de connaissances fiscale (/api/ai/knowledge-base) et filtrage des documents soumis',
+      'Refus par défaut sur `/api/ai/knowledge-base` POST et filtrage strict des sources non approuvées en GET pour les non-administrateurs',
     descriptionFr:
-      'Les actions POST d’administration (`APPROVE`, `REJECT`, `ARCHIVE`, `UPDATE_NEW_VERSION`, `RESET`) et l’inspecteur d’extraction documentaire devaient vérifier l’autorisation du rôle administrateur, appliquer une limitation de débit et analyser les textes contre l’injection de prompt indirecte et les balises XSS.',
+      'La route `/api/ai/knowledge-base` ne doit jamais accorder de rôle administrateur par défaut via un en-tête client et ne doit retourner que les sources `APPROVED_VERIFIED` aux utilisateurs non administrateurs.',
     status: 'REMEDIATED_VERIFIED',
     remediationAppliedFr:
-      'Correction appliquée : contrôle d’autorisation administrateur (`x-fiscaliq-admin-role`), limitation de débit (`KNOWLEDGE_BASE_ADMIN`), protection anti-CSRF et pare-feu documentaire `inspectDocumentSecurity` actifs sur `/api/ai/knowledge-base`.',
+      'Correction appliquée : suppression de l’en-tête par défaut `x-fiscaliq-admin-role`, vérification stricte via `verifyAdminSession` (refus 403 par défaut en POST) et filtrage `includeNonApproved: adminSession.authorized` en GET.',
     affectedFiles: [
       'app/api/ai/knowledge-base/route.ts',
-      'lib/ai/knowledge-base.ts',
-      'lib/security/security-audit-and-gdpr.ts',
+      'lib/security/session-auth.ts',
     ],
   },
   {
@@ -499,12 +474,12 @@ export const SECURITY_AUDIT_FINDINGS_REGISTRY: SecurityAuditFinding[] = [
     severity: 'HIGH',
     category: 'STOCKAGE_PRIVE_ET_CRYPTOGRAPHIE',
     titleFr:
-      'Comparaison cryptographique en temps constant (`timingSafeEqual`) et en-têtes de sécurité sur les téléchargements PDF signés',
+      'Obligation stricte de `FISCALIQ_REPORT_SIGNING_SECRET` en production et comparaison HMAC en temps constant (`timingSafeEqual`)',
     descriptionFr:
-      'La vérification de signature HMAC-SHA256 des liens de téléchargement temporaires utilisait une comparaison de chaînes standard (`!==`) potentiellement exposée aux attaques temporelles, et la réponse binaire PDF devait inclure des en-têtes `X-Content-Type-Options: nosniff` et `Content-Security-Policy: sandbox`.',
+      'Aucun secret HMAC codé en dur ne doit subsister en production pour signer les liens PDF temporaires.',
     status: 'REMEDIATED_VERIFIED',
     remediationAppliedFr:
-      'Correction appliquée : utilisation de `crypto.timingSafeEqual` sur les empreintes HMAC-SHA256 dans `verifySignedDownloadToken` et ajout des en-têtes `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src \'none\'; sandbox` et `Referrer-Policy: no-referrer` sur `/api/reports/download`.',
+      'Correction appliquée : suppression du secret de secours codé en dur, arrêt immédiat au démarrage en production si `FISCALIQ_REPORT_SIGNING_SECRET` (< 32 caractères) est absent, et vérification `crypto.timingSafeEqual`.',
     affectedFiles: [
       'lib/reports/pdf-report-service.ts',
       'app/api/reports/download/route.ts',
@@ -517,10 +492,10 @@ export const SECURITY_AUDIT_FINDINGS_REGISTRY: SecurityAuditFinding[] = [
     titleFr:
       'Minimisation automatique des identifiants sensibles (NIR, SPI, IBAN) et validation stricte des domaines officiels cités',
     descriptionFr:
-      'Un contribuable particulier pouvait saisir par inadvertance son numéro de sécurité sociale (NIR), son numéro fiscal SPI à 13 chiffres ou son IBAN dans une question adressée à l’Assistant IA.',
+      'Un utilisateur pouvait saisir par inadvertance son numéro de sécurité sociale (NIR), son numéro fiscal SPI à 13 chiffres ou son IBAN dans une question adressée à l’Assistant IA.',
     status: 'REMEDIATED_VERIFIED',
     remediationAppliedFr:
-      'Correction appliquée : `enforceDataMinimizationOnInput` masque automatiquement les NIR, SPI à 13 chiffres, IBAN, numéros de carte et mots de passe fiscaux avant tout traitement, et `verifyOfficialCitationIntegrity` garantit que seules des URLs HTTPS des portails officiels français (`impots.gouv.fr`, `bofip.impots.gouv.fr`, `service-public.fr`, `economie.gouv.fr`, `legifrance.gouv.fr`) au statut `APPROVED_VERIFIED` sont restituées.',
+      'Correction appliquée : `enforceDataMinimizationOnInput` masque automatiquement les NIR, SPI à 13 chiffres, IBAN, numéros de carte et mots de passe fiscaux avant tout traitement, et `verifyOfficialCitationIntegrity` vérifie les URLs HTTPS officielles.',
     affectedFiles: [
       'lib/security/security-audit-and-gdpr.ts',
       'lib/ai/gemini-service.ts',
@@ -531,35 +506,17 @@ export const SECURITY_AUDIT_FINDINGS_REGISTRY: SecurityAuditFinding[] = [
     severity: 'MEDIUM',
     category: 'PROTECTION_API_CSRF_RATE_LIMIT',
     titleFr:
-      'Généralisation de la limitation de débit (Rate Limiting), de la validation CSRF et des en-têtes HTTP de sécurité',
+      'En-tête `Content-Security-Policy`, validation CSRF, désactivation de `SWITCH_PLAN_SIMULATION` en production et magasin partagé Upstash/Supabase',
     descriptionFr:
-      'La limitation de débit devait être étendue à l’ensemble des routes API (`/api/calculations`, `/api/reports`, `/api/reports/download`, `/api/ai/knowledge-base`) avec vérification `Sec-Fetch-Site` / `Origin` et en-têtes HTTP globaux.',
+      'Les changements d’abonnement ne doivent intervenir qu’après un webhook de paiement vérifié, la CSP doit être active dans `next.config.ts`, et la limitation de débit / abonnements doivent utiliser un magasin partagé.',
     status: 'REMEDIATED_VERIFIED',
     remediationAppliedFr:
-      'Correction appliquée : `enforceApiRateLimit` et `verifyRequestOriginAndCsrf` déployés sur toutes les routes API, et en-têtes de sécurité configurés dans `next.config.ts`.',
+      'Correction appliquée : `Content-Security-Policy` et `eslint.ignoreDuringBuilds: false` dans `next.config.ts`, suppression de `SWITCH_PLAN_SIMULATION` au profit de `applyVerifiedPaymentWebhook`, et adaptateur `shared-store.ts` (Upstash Redis / Supabase PostgreSQL).',
     affectedFiles: [
       'next.config.ts',
-      'app/api/calculations/route.ts',
+      'lib/security/shared-store.ts',
+      'lib/subscriptions/entitlements.ts',
       'app/api/reports/route.ts',
-      'app/api/reports/download/route.ts',
-    ],
-  },
-  {
-    id: 'SEC-MED-02',
-    severity: 'MEDIUM',
-    category: 'MINIMISATION_RGPD_ET_VIE_PRIVEE',
-    titleFr:
-      'Isolement de l’historique de conversation IA lors du changement de foyer fiscal et mécanisme d’exercice des droits RGPD (Art. 15, 17, 20)',
-    descriptionFr:
-      'Le changement de profil de foyer dans l’interface devait purger ou isoler les échanges de l’Assistant IA par foyer, et les utilisateurs devaient disposer d’une fonction effective d’export (Art. 15/20) et d’effacement immédiat (Art. 17) de leurs rapports et données.',
-    status: 'REMEDIATED_VERIFIED',
-    remediationAppliedFr:
-      'Correction appliquée : historique de conversation indexé par `activeHousehold.id` dans `/app/ai-assistant/page.tsx` et route serveur `/api/security-audit` permettant l’export JSON structuré (Art. 15/20) et la purge immédiate des rapports PDF et compteurs (Art. 17).',
-    affectedFiles: [
-      'app/ai-assistant/page.tsx',
-      'app/api/security-audit/route.ts',
-      'app/settings/page.tsx',
-      'app/privacy/page.tsx',
     ],
   },
   {
@@ -567,13 +524,13 @@ export const SECURITY_AUDIT_FINDINGS_REGISTRY: SecurityAuditFinding[] = [
     severity: 'LOW',
     category: 'DEPENDANCES_ET_CONFIGURATION',
     titleFr:
-      'Persistance en mémoire de démonstration vs connexion Supabase Auth / PostgreSQL RLS en production réelle',
+      'Branchement des variables d’environnement externes (Supabase PostgreSQL / Upstash Redis) requis en déploiement de production',
     descriptionFr:
-      'Dans cet environnement d’aperçu, les foyers et coffres-forts de rapports sont gérés en mémoire côté serveur (`mode: demo_in_memory`) tant que les variables `NEXT_PUBLIC_SUPABASE_URL` et `SUPABASE_SERVICE_ROLE_KEY` ne pointent pas vers une instance Supabase de production.',
+      'Tant que les variables `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` et `UPSTASH_REDIS_REST_URL` ne sont pas renseignées dans l’environnement d’hébergement, le profil utilisateur est stocké dans `localStorage` et les compteurs serveur utilisent le magasin mémoire local de développement.',
     status: 'ARCHITECTURAL_PREPARATION_REQUIRED_BEFORE_LIVE_PROD',
     remediationAppliedFr:
-      'Les schémas SQL DDL complets avec politiques RLS (`auth.uid() = user_id`), révocation des droits anonymes (`REVOKE ALL FROM anon`) et compartiment privé Supabase Storage sont prêts dans `lib/supabase/config.ts`. Une revue juridique du DPO et le branchement Supabase Auth (JWT + MFA) restent requis avant ouverture commerciale.',
-    affectedFiles: ['lib/supabase/config.ts', '.env.example'],
+      'L’adaptateur `lib/security/shared-store.ts` bascule automatiquement vers Upstash Redis ou Supabase PostgreSQL dès que les clés d’environnement sont configurées.',
+    affectedFiles: ['lib/security/shared-store.ts', 'lib/supabase/config.ts', '.env.example'],
   },
 ];
 
@@ -593,69 +550,34 @@ export const GDPR_IMPLEMENTATION_CHECKLIST: GdprRequirementChecklistItem[] = [
       'Collecte strictement limitée aux paramètres nécessaires au calcul de l’impôt',
     technicalImplementationStatus: 'IMPLEMENTED_IN_CODE',
     detailsFr:
-      'Aucun champ ne demande le NIR, le numéro fiscal SPI à 13 chiffres, l’IBAN, l’adresse postale exacte ni le mot de passe impots.gouv.fr. Le filtre `enforceDataMinimizationOnInput` masque automatiquement ces identifiants s’ils sont saisis dans un champ libre.',
+      'Aucun champ ne demande le NIR, le numéro fiscal SPI à 13 chiffres, l’IBAN, l’adresse postale exacte ni le mot de passe impots.gouv.fr. Le filtre `enforceDataMinimizationOnInput` masque automatiquement ces identifiants dans les champs libres.',
   },
   {
     id: 'GDPR-02',
-    gdprArticle: 'Art. 6-1 RGPD (Bases légales du traitement)',
-    requirementTitleFr: 'Définition granulaire des bases légales par finalité',
-    technicalImplementationStatus: 'REQUIRES_LEGAL_AND_DPO_SIGN_OFF',
+    gdprArticle: 'Art. 17 RGPD (Effacement local et purge des rapports de session)',
+    requirementTitleFr:
+      'Bouton « Effacer mes données » (localStorage) et purge des rapports PDF générés en session',
+    technicalImplementationStatus: 'IMPLEMENTED_IN_CODE',
     detailsFr:
-      'Exécution contractuelle/précontractuelle (Art. 6-1-b) pour les simulateurs et rapports PDF ; consentement explicite révocable par case à cocher (Art. 6-1-a) pour l’inclusion du profil du foyer dans une question à l’Assistant IA ; intérêt légitime (Art. 6-1-f) limité à la sécurité anti-abus (Rate Limiting). Validation formelle du registre des activités de traitement (Art. 30) par un DPO requise.',
+      'Les nouveaux visiteurs démarrent avec un profil vierge. Le profil et les simulations sont enregistrés localement dans le navigateur (`localStorage`) et effaçables immédiatement via « Effacer mes données ». Les rapports PDF en session sont purgés via `/api/security-audit`.',
   },
   {
     id: 'GDPR-03',
-    gdprArticle: 'Art. 13 & 14 RGPD (Transparence et information des personnes)',
+    gdprArticle: 'Art. 32 RGPD (Sécurité applicative active dans le code)',
     requirementTitleFr:
-      'Politique de confidentialité claire en français accessible aux particuliers',
+      'Session serveur signée HMAC-SHA256, CSP, anti-CSRF et filtrage des sources officielles',
     technicalImplementationStatus: 'IMPLEMENTED_IN_CODE',
     detailsFr:
-      'Notice complète publiée sur `/privacy` détaillant les finalités, la minimisation, l’isolation par foyer, les durées de conservation, les sous-traitants, l’absence de revente des données et les modalités d’exercice des droits.',
+      'En-têtes `Content-Security-Policy`, vérification d’origine CSRF (`Sec-Fetch-Site` / `Origin`), signature HMAC-SHA256 (`timingSafeEqual`) sur les liens PDF (TTL 15 min) et accès restreint aux sources approuvées (`APPROVED_VERIFIED`).',
   },
   {
     id: 'GDPR-04',
-    gdprArticle: 'Art. 15, 17 & 20 RGPD (Droits d’accès, d’effacement et de portabilité)',
+    gdprArticle: 'Art. 28, 30 & 35 RGPD (Hébergement de production, DPA et AIPD)',
     requirementTitleFr:
-      'Mécanisme libre-service d’export JSON (Art. 15/20) et de suppression immédiate des rapports et données (Art. 17)',
-    technicalImplementationStatus: 'IMPLEMENTED_IN_CODE',
-    detailsFr:
-      'Disponible via `/api/security-audit` et dans `/settings` (onglet Audit Sécurité & Droits RGPD) : export structuré des données du foyer authentifié et purge immédiate des rapports PDF stockés dans le coffre privé.',
-  },
-  {
-    id: 'GDPR-05',
-    gdprArticle: 'Art. 5-1-e RGPD (Limitation de la conservation)',
-    requirementTitleFr:
-      'Politique de rétention et d’expiration automatique des fichiers et journaux',
-    technicalImplementationStatus: 'IMPLEMENTED_IN_CODE',
-    detailsFr:
-      'Liens signés de téléchargement PDF limités à 15 minutes (900 s), purge immédiate à la demande (Art. 17), conservation SQL prévue à 30 jours pour les rapports temporaires et conversations IA (`expires_at`), et 90 jours pour les journaux de sécurité pseudonymisés.',
-  },
-  {
-    id: 'GDPR-06',
-    gdprArticle: 'Art. 28 & Chapitre V RGPD (Sous-traitants et transferts internationaux)',
-    requirementTitleFr:
-      'Encadrement contractuel (DPA) et localisation européenne prioritaire des données',
+      'Configuration de production Supabase / Upstash Redis, contrats sous-traitants (DPA) et validation DPO',
     technicalImplementationStatus: 'REQUIRES_LEGAL_AND_DPO_SIGN_OFF',
     detailsFr:
-      'Architecture préparée pour Supabase PostgreSQL / Storage en région UE (`eu-west-1` / `eu-central-1`) et Google Cloud / Gemini API côté serveur (`europe-west1`). Avant mise en production, signature des accords de sous-traitance (DPA Art. 28) et vérification des Clauses Contractuelles Types (CCT) / EU-US Data Privacy Framework obligatoires.',
-  },
-  {
-    id: 'GDPR-07',
-    gdprArticle: 'Art. 32 RGPD (Sécurité du traitement)',
-    requirementTitleFr:
-      'Isolation Row-Level Security (`auth.uid() = user_id`), chiffrement et contrôle d’accès serveur',
-    technicalImplementationStatus: 'IMPLEMENTED_IN_CODE',
-    detailsFr:
-      'Isolation stricte entre foyers vérifiée par tests automatisés (`403 Forbidden`), signature HMAC-SHA256 vérifiée par `crypto.timingSafeEqual`, aucun secret exposé côté client et révocation des privilèges SQL `anon` sur les tables personnelles.',
-  },
-  {
-    id: 'GDPR-08',
-    gdprArticle: 'Art. 35 RGPD & Lignes directrices CNIL (Criblage AIPD / DPIA)',
-    requirementTitleFr:
-      'Criblage d’Analyse d’Impact relative à la Protection des Données (AIPD)',
-    technicalImplementationStatus: 'REQUIRES_LEGAL_AND_DPO_SIGN_OFF',
-    detailsFr:
-      'Criblage effectué selon les 9 critères CNIL/CEPD : traitement de données financières personnelles et d’évaluation patrimoniale combiné à l’usage d’un modèle d’IA documentaire. Bien que FISCALIQ ne prenne aucune décision produisant des effets juridiques automatisés (Art. 22 RGPD), la réalisation et la validation d’une AIPD formelle par le responsable de traitement et son DPO sont requises avant ouverture publique.',
+      'En l’absence de clés externes configurées, l’application fonctionne en mode local sans base de données externe active. Avant ouverture commerciale : configurer Supabase PostgreSQL/Storage (UE) et Upstash Redis, signer les DPA (Art. 28) et faire valider l’AIPD (Art. 35) par un DPO.',
   },
 ];
 
@@ -679,13 +601,14 @@ export function getSecurityAuditSummary() {
   };
 
   return {
-    auditDateIso: '2026-11-10',
+    auditDateIso: '2026-11-11',
+    sharedStoreBackend: getSharedStoreBackend(),
     scope:
-      'Données fiscales personnelles des particuliers et foyers (Revenus, Quotient familial, Salaires, Déclaration 2042, Assistant IA, Rapports PDF privés, Abonnements)',
+      'Sécurité applicative, sessions signées, CSP, base de connaissances et transparence RGPD',
     counts,
     findings: SECURITY_AUDIT_FINDINGS_REGISTRY,
     gdprChecklist: GDPR_IMPLEMENTATION_CHECKLIST,
     productionReadinessStatementFr:
-      'Toutes les vulnérabilités critiques, élevées et moyennes identifiées dans le code applicatif ont été corrigées et vérifiées par des tests automatisés (0 vulnérabilité critique ouverte). Conformément aux règles d’ingénierie responsable, FISCALIQ ne revendique pas de certification juridique RGPD définitive tant que l’instance Supabase PostgreSQL de production (UE), les contrats sous-traitants (DPA Art. 28) et l’AIPD formelle (Art. 35) n’ont pas été validés par un DPO ou un cabinet d’avocats.',
+      'Les contrôles de sécurité applicatifs (sessions vérifiées, refus par défaut sur l’administration de la base de connaissances, secret HMAC obligatoire en production, CSP et validation ESLint au build) sont actifs. La persistance base de données externe et la validation juridique RGPD dépendent de la configuration de production.',
   };
 }

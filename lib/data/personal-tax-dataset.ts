@@ -14,9 +14,11 @@ import {
 } from '@/lib/calculations/personal-tax-engine';
 import { DataOriginClassification } from './demo-dataset';
 
+export const USER_HOUSEHOLD_ID = 'foyer-utilisateur';
+
 export interface PersonalHouseholdProfile {
   id: string;
-  isDemoData: true;
+  isDemoData: boolean;
   householdName: string;
   situationSummary: string;
   maritalStatus: FamilyMaritalStatus;
@@ -34,6 +36,27 @@ export interface PersonalHouseholdProfile {
   estimatedEligibleTaxCreditsEur: number;
   savingsReserveEur: number;
 }
+
+export const EMPTY_USER_HOUSEHOLD: PersonalHouseholdProfile = {
+  id: USER_HOUSEHOLD_ID,
+  isDemoData: false,
+  householdName: 'Mon foyer',
+  situationSummary: 'Célibataire · 0 enfant (1 part)',
+  maritalStatus: 'celibataire',
+  dependantsCount: 0,
+  activityProfile: 'salarie',
+  employmentCategory: 'non_cadre',
+  cityRegion: 'France',
+  housingStatus: 'Locataire',
+  grossMonthlySalaryEur: 0,
+  annualDeclaredSalaryNetImposableEur: 0,
+  additionalNetTaxableIncomeEur: 0,
+  additionalIncomeLabel: 'Aucun revenu annexe',
+  monthlyEssentialExpensesEur: 0,
+  perContributionAnnualEur: 0,
+  estimatedEligibleTaxCreditsEur: 0,
+  savingsReserveEur: 0,
+};
 
 export interface PersonalMonthlyBudgetPoint {
   month: string;

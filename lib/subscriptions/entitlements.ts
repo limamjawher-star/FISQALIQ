@@ -1,11 +1,23 @@
 /**
  * FISCALIQ — Architecture d'Abonnements Simplifiée :
  * Deux formules claires : Gratuit (0 €) et Premium (5 € / mois).
+ *
+ * SÉCURITÉ :
+ * - Persistance partagée via `shared-store` (Upstash Redis / Supabase PostgreSQL).
+ * - Les changements de formule en production ne sont appliqués qu'après vérification
+ *   cryptographique d'un webhook de paiement signé (HMAC-SHA256).
  */
 
-export type SubscriptionPlanId = 'FREE' | 'PREMIUM' | 'PLUS';
+import crypto from 'crypto';
+import {
+  sharedStoreGetJson,
+  sharedStoreSetJson,
+  getSharedStoreBackend,
+} from '@/lib/security/shared-store';
 
-export const PUBLIC_SUBSCRIPTION_PLANS: ('FREE' | 'PREMIUM')[] = ['FREE', 'PREMIUM'];
+export type SubscriptionPlanId = 'FREE' | 'PREMIUM';
+
+export const PUBLIC_SUBSCRIPTION_PLANS: SubscriptionPlanId[] = ['FREE', 'PREMIUM'];
 
 export type PersonalReportType =
   | 'BILAN_FISCAL_COMPLET'
@@ -40,7 +52,7 @@ const PREMIUM_CONFIG: PlanEntitlementConfig = {
   nameFr: 'Premium',
   taglineFr: 'Toute la puissance fiscale, l’assistant IA et vos dossiers PDF 2042 complets.',
   pricingDisplayLabelFr: '5 € / mois',
-  pricingStatusNoteFr: 'Sans engagement · Aucun paiement facturé en démo.',
+  pricingStatusNoteFr: 'Sans engagement · Activation après paiement vérifié.',
   limits: {
     savedSimulationsMax: 200,
     monthlyAssistantQuestionsMax: 250,
@@ -98,11 +110,6 @@ export const SUBSCRIPTION_PLANS_CONFIG: Record<SubscriptionPlanId, PlanEntitleme
     ],
   },
   PREMIUM: PREMIUM_CONFIG,
-  // Legacy alias mapped directly to Premium (5 €) for backwards compatibility
-  PLUS: {
-    ...PREMIUM_CONFIG,
-    planId: 'PLUS',
-  },
 };
 
 export interface HouseholdUsageSnapshot {
@@ -132,6 +139,7 @@ export interface PaymentProviderAbstraction {
   providerId: 'unconfigured_abstraction' | 'stripe_hosted_checkout_ready';
   paymentsActiveInEnvironment: false;
   cardStoragePolicy: 'NEVER_STORE_CARD_DETAILS_EXTERNAL_CHECKOUT_ONLY';
+  sharedStoreBackend: ReturnType<typeof getSharedStoreBackend>;
   preparePlanUpgradeIntent(params: {
     householdId: string;
     targetPlanId: SubscriptionPlanId;
@@ -146,98 +154,190 @@ export const paymentProviderAdapter: PaymentProviderAbstraction = {
   providerId: 'unconfigured_abstraction',
   paymentsActiveInEnvironment: false,
   cardStoragePolicy: 'NEVER_STORE_CARD_DETAILS_EXTERNAL_CHECKOUT_ONLY',
+  get sharedStoreBackend() {
+    return getSharedStoreBackend();
+  },
   preparePlanUpgradeIntent({ targetPlanId }) {
     const plan = SUBSCRIPTION_PLANS_CONFIG[targetPlanId];
     return {
       status: 'ABSTRACTION_READY_NO_PAYMENT_COLLECTED',
       providerId: 'unconfigured_abstraction',
-      explanationFr: `Offre « ${plan.nameFr} (${plan.pricingDisplayLabelFr}) » prête (aucun paiement facturé en démo, zéro carte stockée).`,
+      explanationFr: `Offre « ${plan.nameFr} (${plan.pricingDisplayLabelFr}) » : les changements d’abonnement sont activés uniquement après réception d’un webhook de paiement signé (zéro carte stockée).`,
     };
   },
 };
 
-const globalForSubscriptions = globalThis as unknown as {
-  __fiscaliqSubscriptionsStore?: Map<string, HouseholdUsageSnapshot>;
+const INITIAL_SUBSCRIPTIONS: Record<string, HouseholdUsageSnapshot> = {
+  'foyer-utilisateur': {
+    householdId: 'foyer-utilisateur',
+    planId: 'FREE',
+    periodMonth: '2026-11',
+    savedSimulationsUsed: 0,
+    assistantQuestionsUsed: 0,
+    pdfReportsGeneratedUsed: 0,
+    updatedAtIso: '2026-11-10T09:00:00.000Z',
+  },
+  'foyer-couple-2-enfants': {
+    householdId: 'foyer-couple-2-enfants',
+    planId: 'PREMIUM',
+    periodMonth: '2026-11',
+    savedSimulationsUsed: 4,
+    assistantQuestionsUsed: 6,
+    pdfReportsGeneratedUsed: 1,
+    updatedAtIso: '2026-11-10T09:00:00.000Z',
+  },
+  'foyer-celibataire-salarie': {
+    householdId: 'foyer-celibataire-salarie',
+    planId: 'FREE',
+    periodMonth: '2026-11',
+    savedSimulationsUsed: 1,
+    assistantQuestionsUsed: 2,
+    pdfReportsGeneratedUsed: 0,
+    updatedAtIso: '2026-11-10T09:00:00.000Z',
+  },
+  'foyer-parent-isole': {
+    householdId: 'foyer-parent-isole',
+    planId: 'PREMIUM',
+    periodMonth: '2026-11',
+    savedSimulationsUsed: 2,
+    assistantQuestionsUsed: 3,
+    pdfReportsGeneratedUsed: 0,
+    updatedAtIso: '2026-11-10T09:00:00.000Z',
+  },
+  'foyer-couple-retraites': {
+    householdId: 'foyer-couple-retraites',
+    planId: 'PREMIUM',
+    periodMonth: '2026-11',
+    savedSimulationsUsed: 3,
+    assistantQuestionsUsed: 4,
+    pdfReportsGeneratedUsed: 1,
+    updatedAtIso: '2026-11-10T09:00:00.000Z',
+  },
 };
 
-const householdSubscriptionsStore =
-  globalForSubscriptions.__fiscaliqSubscriptionsStore ??
-  (globalForSubscriptions.__fiscaliqSubscriptionsStore = new Map<string, HouseholdUsageSnapshot>([
-    [
-      'foyer-couple-2-enfants',
-      {
-        householdId: 'foyer-couple-2-enfants',
-        planId: 'PREMIUM',
-        periodMonth: '2026-11',
-        savedSimulationsUsed: 4,
-        assistantQuestionsUsed: 6,
-        pdfReportsGeneratedUsed: 1,
-        updatedAtIso: '2026-11-10T09:00:00.000Z',
-      },
-    ],
-    [
-      'foyer-celibataire-salarie',
-      {
-        householdId: 'foyer-celibataire-salarie',
-        planId: 'FREE',
-        periodMonth: '2026-11',
-        savedSimulationsUsed: 1,
-        assistantQuestionsUsed: 2,
-        pdfReportsGeneratedUsed: 0,
-        updatedAtIso: '2026-11-10T09:00:00.000Z',
-      },
-    ],
-    [
-      'foyer-parent-isole',
-      {
-        householdId: 'foyer-parent-isole',
-        planId: 'PREMIUM',
-        periodMonth: '2026-11',
-        savedSimulationsUsed: 2,
-        assistantQuestionsUsed: 3,
-        pdfReportsGeneratedUsed: 0,
-        updatedAtIso: '2026-11-10T09:00:00.000Z',
-      },
-    ],
-    [
-      'foyer-couple-retraites',
-      {
-        householdId: 'foyer-couple-retraites',
-        planId: 'PREMIUM',
-        periodMonth: '2026-11',
-        savedSimulationsUsed: 3,
-        assistantQuestionsUsed: 4,
-        pdfReportsGeneratedUsed: 1,
-        updatedAtIso: '2026-11-10T09:00:00.000Z',
-      },
-    ],
-  ]));
+function subKey(householdId: string): string {
+  return `sub:${householdId}`;
+}
 
 export function getOrCreateHouseholdSubscription(
   householdId: string
 ): HouseholdUsageSnapshot {
-  const existing = householdSubscriptionsStore.get(householdId);
+  const existing = sharedStoreGetJson<HouseholdUsageSnapshot>(subKey(householdId));
   if (existing) {
     return { ...existing };
   }
+  const seeded = INITIAL_SUBSCRIPTIONS[householdId];
+  if (seeded) {
+    sharedStoreSetJson(subKey(householdId), seeded);
+    return { ...seeded };
+  }
   const initial: HouseholdUsageSnapshot = {
     householdId,
-    planId: 'PREMIUM',
+    planId: 'FREE',
     periodMonth: '2026-11',
-    savedSimulationsUsed: 1,
-    assistantQuestionsUsed: 1,
+    savedSimulationsUsed: 0,
+    assistantQuestionsUsed: 0,
     pdfReportsGeneratedUsed: 0,
     updatedAtIso: new Date().toISOString(),
   };
-  householdSubscriptionsStore.set(householdId, initial);
+  sharedStoreSetJson(subKey(householdId), initial);
   return { ...initial };
 }
 
+/**
+ * Updates a household's subscription plan ONLY after verifying an HMAC-SHA256
+ * payment webhook signature (`x-payment-webhook-signature`).
+ */
+export function applyVerifiedPaymentWebhook(params: {
+  rawBody: string;
+  signatureHeader: string;
+}): EntitlementCheckResult {
+  const webhookSecret = process.env.FISCALIQ_PAYMENT_WEBHOOK_SECRET?.trim();
+  if (
+    !webhookSecret ||
+    webhookSecret.length < 24 ||
+    webhookSecret.includes('replace-with')
+  ) {
+    const fallbackUsage = getOrCreateHouseholdSubscription('unknown');
+    return {
+      allowed: false,
+      httpStatus: 403,
+      reasonCode: 'PLAN_FEATURE_RESTRICTED',
+      messageFr:
+        'Webhook de paiement refusé (403) : FISCALIQ_PAYMENT_WEBHOOK_SECRET non configuré côté serveur.',
+      planConfig: SUBSCRIPTION_PLANS_CONFIG[fallbackUsage.planId],
+      usage: fallbackUsage,
+    };
+  }
+
+  const expectedSig = crypto
+    .createHmac('sha256', webhookSecret)
+    .update(params.rawBody)
+    .digest('hex');
+
+  const sigA = Buffer.from(params.signatureHeader || '', 'utf8');
+  const sigB = Buffer.from(expectedSig, 'utf8');
+  if (sigA.length !== sigB.length || !crypto.timingSafeEqual(sigA, sigB)) {
+    const fallbackUsage = getOrCreateHouseholdSubscription('unknown');
+    return {
+      allowed: false,
+      httpStatus: 403,
+      reasonCode: 'PLAN_FEATURE_RESTRICTED',
+      messageFr:
+        'Webhook de paiement refusé (403) : signature cryptographique invalide.',
+      planConfig: SUBSCRIPTION_PLANS_CONFIG[fallbackUsage.planId],
+      usage: fallbackUsage,
+    };
+  }
+
+  const parsed = JSON.parse(params.rawBody) as {
+    householdId?: string;
+    newPlanId?: SubscriptionPlanId;
+  };
+  const householdId = String(parsed.householdId || '').trim();
+  const newPlanId: SubscriptionPlanId =
+    parsed.newPlanId === 'PREMIUM' ? 'PREMIUM' : 'FREE';
+
+  const current = getOrCreateHouseholdSubscription(householdId);
+  const updated: HouseholdUsageSnapshot = {
+    ...current,
+    planId: newPlanId,
+    updatedAtIso: new Date().toISOString(),
+  };
+  sharedStoreSetJson(subKey(householdId), updated);
+
+  return {
+    allowed: true,
+    httpStatus: 200,
+    reasonCode: 'ALLOWED',
+    messageFr: `Abonnement mis à jour par webhook vérifié : ${SUBSCRIPTION_PLANS_CONFIG[newPlanId].nameFr}.`,
+    planConfig: SUBSCRIPTION_PLANS_CONFIG[newPlanId],
+    usage: updated,
+  };
+}
+
+/**
+ * Test-only helper disabled in production.
+ * In production, plan changes only happen via `applyVerifiedPaymentWebhook`.
+ */
 export function setHouseholdPlanForSimulation(
   authenticatedHouseholdId: string,
   targetHouseholdId: string,
   newPlanId: SubscriptionPlanId
 ): EntitlementCheckResult {
+  if (process.env.NODE_ENV === 'production') {
+    const fallbackUsage = getOrCreateHouseholdSubscription(targetHouseholdId || 'unknown');
+    return {
+      allowed: false,
+      httpStatus: 403,
+      reasonCode: 'PLAN_FEATURE_RESTRICTED',
+      messageFr:
+        'Accès refusé (403) : le changement de formule sans paiement vérifié est désactivé en production.',
+      planConfig: SUBSCRIPTION_PLANS_CONFIG[fallbackUsage.planId],
+      usage: fallbackUsage,
+    };
+  }
+
   if (!authenticatedHouseholdId || authenticatedHouseholdId !== targetHouseholdId) {
     const fallbackUsage = getOrCreateHouseholdSubscription(targetHouseholdId || 'unknown');
     return {
@@ -256,7 +356,7 @@ export function setHouseholdPlanForSimulation(
     planId: newPlanId,
     updatedAtIso: new Date().toISOString(),
   };
-  householdSubscriptionsStore.set(targetHouseholdId, updated);
+  sharedStoreSetJson(subKey(targetHouseholdId), updated);
 
   return {
     allowed: true,
@@ -323,7 +423,7 @@ export function verifyReportGenerationEntitlement(params: {
       pdfReportsGeneratedUsed: usage.pdfReportsGeneratedUsed + 1,
       updatedAtIso: new Date().toISOString(),
     };
-    householdSubscriptionsStore.set(targetHouseholdId, updated);
+    sharedStoreSetJson(subKey(targetHouseholdId), updated);
     return {
       allowed: true,
       httpStatus: 200,
@@ -345,22 +445,7 @@ export function verifyReportGenerationEntitlement(params: {
 }
 
 export function resetSubscriptionStoreForTests(): void {
-  householdSubscriptionsStore.set('foyer-celibataire-salarie', {
-    householdId: 'foyer-celibataire-salarie',
-    planId: 'FREE',
-    periodMonth: '2026-11',
-    savedSimulationsUsed: 1,
-    assistantQuestionsUsed: 2,
-    pdfReportsGeneratedUsed: 0,
-    updatedAtIso: '2026-11-10T09:00:00.000Z',
-  });
-  householdSubscriptionsStore.set('foyer-couple-2-enfants', {
-    householdId: 'foyer-couple-2-enfants',
-    planId: 'PREMIUM',
-    periodMonth: '2026-11',
-    savedSimulationsUsed: 4,
-    assistantQuestionsUsed: 6,
-    pdfReportsGeneratedUsed: 1,
-    updatedAtIso: '2026-11-10T09:00:00.000Z',
-  });
+  for (const [id, snapshot] of Object.entries(INITIAL_SUBSCRIPTIONS)) {
+    sharedStoreSetJson(subKey(id), snapshot);
+  }
 }

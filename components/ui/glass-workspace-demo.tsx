@@ -61,7 +61,7 @@ export const WARM_GLASS_PALETTE: CSSProperties = {
 } as CSSProperties;
 
 export const DEFAULT_WARM_ROOM_BACKGROUND =
-  "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=2000&q=80";
+  "/assets/visuals/editorial-paris-fintech.jpg";
 
 const settings = {
   useHostTheme: false,

@@ -13,11 +13,11 @@ import {
 } from '@/lib/subscriptions/entitlements';
 import {
   getSecurityAuditSummary,
-  verifyHouseholdDataIsolation,
   verifyRequestOriginAndCsrf,
   enforceApiRateLimit,
   extractClientIdentifier,
 } from '@/lib/security/security-audit-and-gdpr';
+import { resolveVerifiedHouseholdSession } from '@/lib/security/session-auth';
 
 export async function GET(request: NextRequest) {
   const rateLimit = enforceApiRateLimit({
@@ -59,10 +59,22 @@ export async function POST(request: NextRequest) {
       | 'GDPR_EXPORT_ART_15_20'
       | 'GDPR_ERASURE_ART_17';
 
-    const authenticatedHouseholdId =
-      request.headers.get('x-authenticated-household-id') ||
-      String(body?.authenticatedHouseholdId || '');
-    const targetHouseholdId = String(body?.targetHouseholdId || '');
+    const requestedTargetHouseholdId =
+      typeof body?.targetHouseholdId === 'string' ? body.targetHouseholdId : null;
+
+    // Derive household strictly from verified session; never trust x-authenticated-household-id or body.authenticatedHouseholdId
+    const session = resolveVerifiedHouseholdSession(request, requestedTargetHouseholdId);
+    if (!session.authenticated) {
+      return NextResponse.json(
+        {
+          authorized: false,
+          error: session.errorFr,
+        },
+        { status: session.httpStatus }
+      );
+    }
+
+    const authenticatedHouseholdId = session.householdId;
 
     const rateLimit = enforceApiRateLimit({
       category: 'GDPR_PRIVACY_RIGHTS',
@@ -78,31 +90,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const isolation = verifyHouseholdDataIsolation({
-      authenticatedHouseholdId,
-      targetHouseholdId,
-      requireNonEmpty: true,
-    });
-    if (!isolation.authorized) {
-      return NextResponse.json(
-        {
-          authorized: false,
-          error: isolation.errorFr,
-        },
-        { status: 403 }
-      );
-    }
-
     if (action === 'GDPR_EXPORT_ART_15_20') {
       const householdProfile =
-        DEMO_PERSONAL_HOUSEHOLDS.find((h) => h.id === targetHouseholdId) || null;
+        DEMO_PERSONAL_HOUSEHOLDS.find((h) => h.id === authenticatedHouseholdId) || null;
       const reportsRes = listAuthorizedHouseholdReports({
         authenticatedHouseholdId,
-        requestedHouseholdId: targetHouseholdId,
+        requestedHouseholdId: authenticatedHouseholdId,
       });
-      const subscriptionUsage = getOrCreateHouseholdSubscription(targetHouseholdId);
+      const subscriptionUsage = getOrCreateHouseholdSubscription(authenticatedHouseholdId);
       const savedSimulations = INITIAL_SAVED_PERSONAL_SIMULATIONS.filter(
-        (s) => s.householdId === targetHouseholdId
+        (s) => s.householdId === authenticatedHouseholdId
       );
 
       return NextResponse.json(
@@ -110,7 +107,7 @@ export async function POST(request: NextRequest) {
           authorized: true,
           gdprAction: 'ART_15_ACCESS_AND_ART_20_PORTABILITY',
           exportedAtIso: new Date().toISOString(),
-          householdId: targetHouseholdId,
+          householdId: authenticatedHouseholdId,
           dataMinimizedGuarantee:
             'Aucun NIR, aucun numéro fiscal SPI à 13 chiffres, aucun IBAN ni aucune coordonnée de carte bancaire n’est stocké par FISCALIQ.',
           exportPackage: {
@@ -135,7 +132,7 @@ export async function POST(request: NextRequest) {
     if (action === 'GDPR_ERASURE_ART_17') {
       const purgeResult = purgeHouseholdReportsForGdprErasure({
         authenticatedHouseholdId,
-        targetHouseholdId,
+        targetHouseholdId: authenticatedHouseholdId,
       });
 
       if (!purgeResult.authorized) {
@@ -153,8 +150,8 @@ export async function POST(request: NextRequest) {
           authorized: true,
           gdprAction: 'ART_17_RIGHT_TO_ERASURE',
           erasureCertificate: {
-            certificateId: `gdpr-erasure-${targetHouseholdId}-${Date.now()}`,
-            householdId: targetHouseholdId,
+            certificateId: `gdpr-erasure-${authenticatedHouseholdId}-${Date.now()}`,
+            householdId: authenticatedHouseholdId,
             erasedAtIso: purgeResult.erasedAtIso,
             deletedReportsCount: purgeResult.deletedReportsCount,
             deletedStoragePaths: purgeResult.deletedStoragePaths,

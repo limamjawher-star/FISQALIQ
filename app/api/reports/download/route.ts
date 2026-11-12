@@ -4,30 +4,26 @@ import {
   enforceApiRateLimit,
   extractClientIdentifier,
 } from '@/lib/security/security-audit-and-gdpr';
+import { resolveVerifiedHouseholdSession } from '@/lib/security/session-auth';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const token = searchParams.get('token') || '';
-  const headerAuthHouseholdId = request.headers.get('x-authenticated-household-id');
-  const queryHouseholdId = searchParams.get('householdId') || '';
+  const queryHouseholdId = searchParams.get('householdId');
 
-  // Si l'en-tête d'authentification est présent et diffère du paramètre d'URL, rejet immédiat 403
-  if (
-    headerAuthHouseholdId &&
-    queryHouseholdId &&
-    headerAuthHouseholdId !== queryHouseholdId
-  ) {
+  // Derive household strictly from verified session; never trust x-authenticated-household-id
+  const session = resolveVerifiedHouseholdSession(request, queryHouseholdId);
+  if (!session.authenticated) {
     return NextResponse.json(
       {
         authorized: false,
-        error:
-          'Accès refusé (403) : conflit entre l’en-tête d’authentification du foyer et le paramètre du lien signé.',
+        error: session.errorFr,
       },
-      { status: 403 }
+      { status: session.httpStatus }
     );
   }
 
-  const authenticatedHouseholdId = headerAuthHouseholdId || queryHouseholdId;
+  const authenticatedHouseholdId = session.householdId;
 
   const rateLimit = enforceApiRateLimit({
     category: 'PDF_REPORTS',

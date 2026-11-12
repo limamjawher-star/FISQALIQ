@@ -158,7 +158,7 @@ export interface DataOriginBadgeProps {
 export function DataOriginBadge({ classification, compact = false }: DataOriginBadgeProps) {
   const config = {
     CALCUL_VERIFIE: {
-      label: compact ? 'CALCUL VÉRIFIÉ' : 'CALCUL DÉTERMINISTE VÉRIFIÉ',
+      label: compact ? 'CALCUL VÉRIFIÉ' : 'CALCUL OFFICIEL VÉRIFIÉ',
       classes: 'bg-emerald-50 text-emerald-900 border-emerald-300',
       dot: 'bg-[#10B981]',
     },
@@ -320,7 +320,7 @@ export function EmptyState({
   );
 }
 
-export function InlineLoadingBanner({ label = 'Exécution du moteur déterministe...' }: { label?: string }) {
+export function InlineLoadingBanner({ label = 'Calcul en cours...' }: { label?: string }) {
   return (
     <div
       role="status"

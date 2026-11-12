@@ -22,6 +22,7 @@ import {
   verifyRequestOriginAndCsrf,
   inspectDocumentSecurity,
 } from '@/lib/security/security-audit-and-gdpr';
+import { verifyAdminSession } from '@/lib/security/session-auth';
 
 export async function GET(request: NextRequest) {
   const rateLimit = enforceApiRateLimit({
@@ -36,6 +37,9 @@ export async function GET(request: NextRequest) {
       { status: 429 }
     );
   }
+
+  // Non-admins receive only APPROVED_VERIFIED sources
+  const adminSession = verifyAdminSession(request);
 
   const { searchParams } = new URL(request.url);
   const query = (searchParams.get('q') || '').slice(0, 600);
@@ -54,11 +58,11 @@ export async function GET(request: NextRequest) {
         : 'ALL';
 
   const sources = getKnowledgeRegistrySources({
-    includeNonApproved: true,
+    includeNonApproved: adminSession.authorized,
     topic,
     publisher,
     normativeTier,
-    verificationStatus,
+    verificationStatus: adminSession.authorized ? verificationStatus : 'APPROVED_VERIFIED',
     applicableIncomeYear,
   });
 
@@ -76,8 +80,9 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     sources,
     searchResults,
+    isAdminSession: adminSession.authorized,
     authoritativeGuardrail:
-      'Seules les sources au statut APPROVED_VERIFIED peuvent être retournées dans searchResults et utilisées par l’assistant fiscal.',
+      'Seules les sources au statut APPROVED_VERIFIED sont retournées aux utilisateurs non-administrateurs et utilisées par l’assistant fiscal.',
   });
 }
 
@@ -104,23 +109,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const adminRoleHeader = (
-      request.headers.get('x-fiscaliq-admin-role') || 'comite_juridique_interne'
-    ).toLowerCase();
-
-    if (
-      adminRoleHeader === 'unauthorized' ||
-      adminRoleHeader === 'anonymous' ||
-      adminRoleHeader === 'external_user' ||
-      adminRoleHeader === 'lecteur_externe'
-    ) {
+    // Deny by default: require a cryptographically verified admin session
+    const adminSession = verifyAdminSession(request);
+    if (!adminSession.authorized) {
       return NextResponse.json(
         {
           authorized: false,
-          error:
-            'Accès refusé (403) : les actions de gouvernance sur le registre officiel des sources fiscales sont réservées au Comité Juridique & Fiscal habilité.',
+          error: adminSession.errorFr,
         },
-        { status: 403 }
+        { status: adminSession.httpStatus }
       );
     }
 

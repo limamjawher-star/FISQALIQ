@@ -2,11 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { DEMO_PERSONAL_HOUSEHOLDS, PersonalHouseholdProfile } from '@/lib/data/personal-tax-dataset';
 import {
   getOrCreateHouseholdSubscription,
-  setHouseholdPlanForSimulation,
+  applyVerifiedPaymentWebhook,
   PUBLIC_SUBSCRIPTION_PLANS,
   SUBSCRIPTION_PLANS_CONFIG,
   paymentProviderAdapter,
-  SubscriptionPlanId,
   PersonalReportType,
 } from '@/lib/subscriptions/entitlements';
 import {
@@ -19,15 +18,25 @@ import {
   extractClientIdentifier,
   verifyRequestOriginAndCsrf,
 } from '@/lib/security/security-audit-and-gdpr';
+import { resolveVerifiedHouseholdSession } from '@/lib/security/session-auth';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const authenticatedHouseholdId =
-    request.headers.get('x-authenticated-household-id') ||
-    searchParams.get('authenticatedHouseholdId') ||
-    '';
-  const requestedHouseholdId =
-    searchParams.get('householdId') || authenticatedHouseholdId;
+  const requestedHouseholdId = searchParams.get('householdId');
+
+  // Derive household strictly from verified session; never trust headers or query params for auth
+  const session = resolveVerifiedHouseholdSession(request, requestedHouseholdId);
+  if (!session.authenticated) {
+    return NextResponse.json(
+      {
+        authorized: false,
+        error: session.errorFr,
+      },
+      { status: session.httpStatus }
+    );
+  }
+
+  const authenticatedHouseholdId = session.householdId;
 
   const rateLimit = enforceApiRateLimit({
     category: 'PDF_REPORTS',
@@ -45,7 +54,7 @@ export async function GET(request: NextRequest) {
 
   const listResult = listAuthorizedHouseholdReports({
     authenticatedHouseholdId,
-    requestedHouseholdId,
+    requestedHouseholdId: requestedHouseholdId || authenticatedHouseholdId,
   });
 
   if (!listResult.authorized) {
@@ -88,6 +97,42 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const rawBody = await request.text();
+    let body: Record<string, unknown> = {};
+    try {
+      body = rawBody ? JSON.parse(rawBody) : {};
+    } catch {
+      return NextResponse.json({ error: 'Corps JSON invalide.' }, { status: 400 });
+    }
+
+    const action = String(body?.action || '');
+
+    // Verified payment webhook endpoint: authenticates via HMAC-SHA256 signature header
+    if (action === 'PAYMENT_WEBHOOK') {
+      const signatureHeader = request.headers.get('x-payment-webhook-signature') || '';
+      const webhookRes = applyVerifiedPaymentWebhook({
+        rawBody,
+        signatureHeader,
+      });
+
+      if (!webhookRes.allowed) {
+        return NextResponse.json(
+          {
+            allowed: false,
+            error: webhookRes.messageFr,
+          },
+          { status: webhookRes.httpStatus }
+        );
+      }
+
+      return NextResponse.json({
+        allowed: true,
+        message: webhookRes.messageFr,
+        activePlan: webhookRes.planConfig,
+        usage: webhookRes.usage,
+      });
+    }
+
     const csrfCheck = verifyRequestOriginAndCsrf(request);
     if (!csrfCheck.allowed) {
       return NextResponse.json(
@@ -99,14 +144,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const body = await request.json();
-    const action = body?.action as string;
-    const authenticatedHouseholdId =
-      request.headers.get('x-authenticated-household-id') ||
-      String(body?.authenticatedHouseholdId || '');
-    const targetHouseholdId = String(
-      body?.targetHouseholdId || body?.household?.id || authenticatedHouseholdId
-    );
+    // Derive household from verified session; never trust x-authenticated-household-id or body IDs
+    const requestedTargetId =
+      typeof body?.targetHouseholdId === 'string' ? body.targetHouseholdId : null;
+    const session = resolveVerifiedHouseholdSession(request, requestedTargetId);
+    if (!session.authenticated) {
+      return NextResponse.json(
+        {
+          allowed: false,
+          error: session.errorFr,
+        },
+        { status: session.httpStatus }
+      );
+    }
+
+    const authenticatedHouseholdId = session.householdId;
 
     const rateLimit = enforceApiRateLimit({
       category: 'PDF_REPORTS',
@@ -126,14 +178,19 @@ export async function POST(request: NextRequest) {
       const reportType = (body?.reportType || 'BILAN_FISCAL_COMPLET') as PersonalReportType;
       const taxYear: 2026 | 2025 = body?.taxYear === 2025 ? 2025 : 2026;
 
-      const household: PersonalHouseholdProfile =
-        body?.household ||
-        DEMO_PERSONAL_HOUSEHOLDS.find((h) => h.id === targetHouseholdId) ||
+      const clientHousehold = body?.household as PersonalHouseholdProfile | undefined;
+      const fallbackHousehold =
+        DEMO_PERSONAL_HOUSEHOLDS.find((h) => h.id === authenticatedHouseholdId) ||
         DEMO_PERSONAL_HOUSEHOLDS[0];
+
+      const household: PersonalHouseholdProfile = {
+        ...(clientHousehold || fallbackHousehold),
+        id: authenticatedHouseholdId,
+      };
 
       const genResult = generateAndStoreAuthorizedPdfReport({
         authenticatedHouseholdId,
-        household: { ...household, id: targetHouseholdId },
+        household,
         reportType,
         taxYear,
       });
@@ -154,7 +211,7 @@ export async function POST(request: NextRequest) {
 
       const listResult = listAuthorizedHouseholdReports({
         authenticatedHouseholdId,
-        requestedHouseholdId: targetHouseholdId,
+        requestedHouseholdId: authenticatedHouseholdId,
       });
 
       return NextResponse.json(
@@ -177,17 +234,6 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'REFRESH_SIGNED_URL') {
-      if (!authenticatedHouseholdId || authenticatedHouseholdId !== targetHouseholdId) {
-        return NextResponse.json(
-          {
-            allowed: false,
-            error:
-              'Accès refusé (403) : vous ne pouvez générer un lien de téléchargement que pour un rapport appartenant à votre propre foyer fiscal.',
-          },
-          { status: 403 }
-        );
-      }
-
       const reportId = String(body?.reportId || '');
       const freshSigned = issueSignedDownloadToken({
         reportId,
@@ -201,39 +247,14 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    if (action === 'SWITCH_PLAN_SIMULATION') {
-      const newPlanId = (body?.newPlanId || 'PLUS') as SubscriptionPlanId;
-      const switchRes = setHouseholdPlanForSimulation(
-        authenticatedHouseholdId,
-        targetHouseholdId,
-        newPlanId
-      );
-
-      if (!switchRes.allowed) {
-        return NextResponse.json(
-          {
-            allowed: false,
-            error: switchRes.messageFr,
-          },
-          { status: switchRes.httpStatus }
-        );
-      }
-
-      const paymentIntentInfo = paymentProviderAdapter.preparePlanUpgradeIntent({
-        householdId: authenticatedHouseholdId,
-        targetPlanId: newPlanId,
-      });
-
-      return NextResponse.json({
-        allowed: true,
-        message: switchRes.messageFr,
-        activePlan: switchRes.planConfig,
-        usage: switchRes.usage,
-        paymentAbstractionNotice: paymentIntentInfo,
-      });
-    }
-
-    return NextResponse.json({ error: 'Action non reconnue.' }, { status: 400 });
+    return NextResponse.json(
+      {
+        allowed: false,
+        error:
+          'Action non autorisée : les changements d’abonnement ne sont appliqués qu’après validation cryptographique d’un webhook de paiement vérifié.',
+      },
+      { status: 403 }
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Erreur interne du serveur.';
     return NextResponse.json({ error: message }, { status: 500 });

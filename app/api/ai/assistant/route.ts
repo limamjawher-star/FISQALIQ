@@ -9,10 +9,10 @@ import {
 } from '@/lib/ai/gemini-service';
 import {
   verifyRequestOriginAndCsrf,
-  verifyHouseholdDataIsolation,
   enforceApiRateLimit,
   extractClientIdentifier,
 } from '@/lib/security/security-audit-and-gdpr';
+import { resolveVerifiedHouseholdSession } from '@/lib/security/session-auth';
 
 export async function POST(req: NextRequest) {
   try {
@@ -26,44 +26,37 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json();
 
-    // Si la requête suit le schéma personnel, utiliser le moteur personnel complet avec contrôle d'isolation
+    // Si la requête suit le schéma personnel, utiliser le moteur personnel complet avec session vérifiée
     const personalParsed = personalTaxAssistantQuerySchema.safeParse(body);
     if (personalParsed.success && !body.companyContext) {
-      const headerAuthHouseholdId = req.headers.get('x-authenticated-household-id');
-      const effectiveAuthHouseholdId =
-        headerAuthHouseholdId || personalParsed.data.authorizedHouseholdId || '';
+      const session = resolveVerifiedHouseholdSession(req);
 
-      if (personalParsed.data.useHouseholdProfile && personalParsed.data.householdContext) {
-        const isolation = verifyHouseholdDataIsolation({
-          authenticatedHouseholdId: effectiveAuthHouseholdId,
-          targetHouseholdId: personalParsed.data.householdContext.householdId,
-          requireNonEmpty: true,
-        });
-
-        if (
-          !isolation.authorized ||
-          (personalParsed.data.authorizedHouseholdId &&
-            personalParsed.data.authorizedHouseholdId !==
-              personalParsed.data.householdContext.householdId)
-        ) {
-          return NextResponse.json(
-            {
-              authorized: false,
-              error:
-                isolation.errorFr ||
-                'Accès refusé (403) : isolation stricte des données personnelles entre foyers.',
-            },
-            { status: 403 }
-          );
-        }
+      if (!session.authenticated) {
+        return NextResponse.json(
+          {
+            authorized: false,
+            error: session.errorFr,
+          },
+          { status: session.httpStatus }
+        );
       }
 
-      const clientKey = extractClientIdentifier(req, effectiveAuthHouseholdId || 'anon');
+      const verifiedHouseholdId = session.householdId;
+      const clientKey = extractClientIdentifier(req, verifiedHouseholdId);
+
+      const sanitizedHouseholdContext =
+        personalParsed.data.useHouseholdProfile && personalParsed.data.householdContext
+          ? {
+              ...personalParsed.data.householdContext,
+              householdId: verifiedHouseholdId,
+            }
+          : undefined;
+
       const responsePayload = await generatePersonalTaxAssistantAnswer(
         {
           ...personalParsed.data,
-          authorizedHouseholdId:
-            effectiveAuthHouseholdId || personalParsed.data.authorizedHouseholdId,
+          authorizedHouseholdId: verifiedHouseholdId,
+          householdContext: sanitizedHouseholdContext,
         },
         clientKey
       );

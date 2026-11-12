@@ -385,7 +385,7 @@ create table if not exists public.user_subscriptions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null unique references auth.users(id) on delete cascade,
   household_id text not null,
-  plan_tier text not null default 'FREE' check (plan_tier in ('FREE', 'PLUS', 'PREMIUM')),
+  plan_tier text not null default 'FREE' check (plan_tier in ('FREE', 'PREMIUM')),
   subscription_status text not null default 'ACTIVE_CONFIGURATION' check (
     subscription_status in ('ACTIVE_CONFIGURATION', 'TRIALING', 'CANCELED')
   ),

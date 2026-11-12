@@ -8,8 +8,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { gsap } from "gsap";
-import { useGSAP } from "@gsap/react";
+
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -34,7 +33,6 @@ import {
   Plane,
 } from "lucide-react";
 
-gsap.registerPlugin(useGSAP);
 
 export type GlassSettings = {
   blur: number;
@@ -104,10 +102,10 @@ const defaults: GlassSettings = {
   edge: 0.6,
 };
 const tabs = [
-  { id: "overview", label: "Overview", icon: Home },
-  { id: "activity", label: "Activity", icon: Wallet },
-  { id: "savings", label: "Savings", icon: Target },
-  { id: "reports", label: "Reports", icon: ChartNoAxesCombined },
+  { id: "overview", label: "Mon impôt", icon: Home },
+  { id: "activity", label: "Opérations", icon: Wallet },
+  { id: "savings", label: "Économies", icon: Target },
+  { id: "reports", label: "Rapports", icon: ChartNoAxesCombined },
 ] as const;
 type View = (typeof tabs)[number]["id"];
 const bounded = (value: number, min: number, max: number, fallback: number) =>
@@ -258,30 +256,6 @@ export default function GlassWorkspace({
     ),
   );
 
-  useGSAP(
-    () => {
-      const mm = gsap.matchMedia();
-      mm.add("(prefers-reduced-motion: no-preference)", () => {
-        const panels = content.current?.querySelectorAll(".gw-reveal");
-        if (!panels?.length) return;
-        gsap.fromTo(
-          panels,
-          { y: 12, opacity: 0.45, filter: "blur(3px)" },
-          {
-            y: 0,
-            opacity: 1,
-            filter: "blur(0px)",
-            duration: 0.48,
-            stagger: 0.045,
-            ease: "power3.out",
-            clearProps: "transform,opacity,filter",
-          },
-        );
-      });
-      return () => mm.revert();
-    },
-    { scope: root, dependencies: [view], revertOnUpdate: true },
-  );
 
   function updateGlass(patch: Partial<GlassSettings>) {
     const next = normalize({ ...material, ...patch });
@@ -507,7 +481,7 @@ export default function GlassWorkspace({
               {t.status === "Completed" && (
                 <Check size={12} aria-hidden="true" />
               )}
-              {t.status}
+              {t.status === "Completed" ? "Effectué" : "À venir"}
             </span>
             <strong className={t.amount > 0 ? "gw-positive" : ""}>
               {t.amount > 0 ? "+" : "−"}
@@ -622,7 +596,7 @@ export default function GlassWorkspace({
             </span>
             <strong>{brand}</strong>
             <span className="gw-brand-divider" />
-            <span className="gw-personal">Personal workspace</span>
+            <span className="gw-personal">Espace personnel</span>
           </a>
           <div className="gw-toolbar">
             <button
@@ -637,7 +611,7 @@ export default function GlassWorkspace({
               aria-controls={`${id}-material`}
             >
               <Settings2 size={16} aria-hidden="true" />
-              <span>Adjust glass</span>
+              <span>Ajuster le verre</span>
             </button>
             {!useHostTheme && (
               <button
@@ -677,17 +651,17 @@ export default function GlassWorkspace({
               <div>
                 <p className="gw-greeting">
                   {view === "overview" && userName
-                    ? `Welcome back, ${userName}.`
-                    : "Your personal workspace"}
+                    ? `Bonjour, ${userName}.`
+                    : "Votre espace personnel"}
                 </p>
                 <h1>
                   {view === "overview"
-                    ? "Overview"
+                    ? "Mon impôt"
                     : view === "activity"
-                      ? "Activity"
+                      ? "Opérations"
                       : view === "savings"
-                        ? "Savings & goals"
-                        : "Reports"}
+                        ? "Mes économies"
+                        : "Mes rapports"}
                 </h1>
               </div>
               <div className="gw-heading-action">
@@ -698,7 +672,7 @@ export default function GlassWorkspace({
                     onClick={exportReport}
                   >
                     <Download size={14} aria-hidden="true" />
-                    Export CSV
+                    Exporter CSV
                   </button>
                 ) : (
                   periodLabel && <span className="gw-date">{periodLabel}</span>
@@ -712,7 +686,7 @@ export default function GlassWorkspace({
                   <div className="gw-overview-grid">
                     <section className="gw-panel gw-balance gw-reveal">
                       <div className="gw-panel-title">
-                        <span>Available balance</span>
+                        <span>Net disponible</span>
                         <Wallet size={17} aria-hidden="true" />
                       </div>
                       <strong className="gw-balance-value">
@@ -757,21 +731,21 @@ export default function GlassWorkspace({
                     </section>
                     <section className="gw-panel gw-cashflow gw-reveal">
                       <div className="gw-panel-title">
-                        <h2>Cash flow</h2>
-                        {periodSelector("Chart period")}
+                        <h2>Revenus et impôts</h2>
+                        {periodSelector("Période")}
                       </div>
                       <div className="gw-chart-summary">
                         <div>
                           <span>
                             <i />
-                            Money in
+                            Entrées
                           </span>
                           <strong>{format(income)}</strong>
                         </div>
                         <div>
                           <span>
                             <i />
-                            Money out
+                            Sorties
                           </span>
                           <strong>{format(expenses)}</strong>
                         </div>
@@ -782,13 +756,13 @@ export default function GlassWorkspace({
                   <div className="gw-lower-grid">
                     <section className="gw-panel gw-reveal">
                       <div className="gw-panel-title">
-                        <h2>Recent activity</h2>
+                        <h2>Opérations récentes</h2>
                         <button
                           className="gw-text-button"
                           type="button"
                           onClick={() => changeView("activity")}
                         >
-                          View all
+                          Tout voir
                           <ArrowRight size={14} aria-hidden="true" />
                         </button>
                       </div>
@@ -796,9 +770,9 @@ export default function GlassWorkspace({
                     </section>
                     <section className="gw-panel gw-reveal">
                       <div className="gw-panel-title">
-                        <h2>Savings goals</h2>
+                        <h2>Objectifs d’économies</h2>
                         <span className="gw-small-label">
-                          {goals.length} active
+                          {goals.length} actifs
                         </span>
                       </div>
                       {goalList}
@@ -988,38 +962,38 @@ export default function GlassWorkspace({
           <aside
             className="gw-material gw-glass"
             id={`${id}-material`}
-            aria-label="Glass appearance"
+            aria-label="Apparence du verre"
           >
             <div className="gw-material-title">
               <div>
                 <span className="gw-material-icon">
                   <Settings2 size={18} aria-hidden="true" />
                 </span>
-                <h2>Glass appearance</h2>
+                <h2>Apparence du verre</h2>
               </div>
               <button
                 type="button"
                 className="gw-icon-button"
-                aria-label="Close glass settings"
+                aria-label="Fermer"
                 onClick={closeSettings}
               >
                 <X size={18} aria-hidden="true" />
               </button>
             </div>
-            <p>Adjust the material across your workspace.</p>
+            <p>Ajustez la transparence du verre en direct.</p>
             <div className="gw-material-sample" aria-hidden="true">
               <Layers size={28} strokeWidth={1.1} />
-              <span>Live material preview</span>
+              <span>Aperçu en direct</span>
             </div>
-            <div className="gw-presets" aria-label="Glass presets">
+            <div className="gw-presets" aria-label="Styles de verre">
               {[
                 {
-                  name: "Clear",
+                  name: "Clair",
                   value: { blur: 8, opacity: 0.12, saturation: 1.1, edge: 0.8 },
                 },
-                { name: "Frosted", value: defaults },
+                { name: "Dépoli", value: defaults },
                 {
-                  name: "Solid",
+                  name: "Opaque",
                   value: { blur: 32, opacity: 0.86, saturation: 1, edge: 0.35 },
                 },
               ].map((p) => (
@@ -1035,7 +1009,7 @@ export default function GlassWorkspace({
             {[
               {
                 key: "blur",
-                label: "Blur",
+                label: "Flou",
                 min: 0,
                 max: 40,
                 step: 1,
@@ -1043,7 +1017,7 @@ export default function GlassWorkspace({
               },
               {
                 key: "opacity",
-                label: "Opacity",
+                label: "Opacité",
                 min: 0.08,
                 max: 0.9,
                 step: 0.01,
@@ -1059,7 +1033,7 @@ export default function GlassWorkspace({
               },
               {
                 key: "edge",
-                label: "Edge light",
+                label: "Reflet des bords",
                 min: 0,
                 max: 1,
                 step: 0.05,
@@ -1085,7 +1059,7 @@ export default function GlassWorkspace({
               </label>
             ))}
             <label className="gw-tint">
-              Glass tint{" "}
+              Teinte du verre{" "}
               <input
                 type="color"
                 value={material.tint}
@@ -1097,7 +1071,7 @@ export default function GlassWorkspace({
               type="button"
               onClick={() => updateGlass(normalize(glass))}
             >
-              Reset appearance
+              Réinitialiser l’apparence
             </button>
           </aside>
         )}
@@ -1467,6 +1441,23 @@ export const GLASS_WORKSPACE_STYLES = `
   padding: 22px;
   min-width: 0;
   position: relative;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .gw-reveal {
+    animation: gwReveal 0.45s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  }
+}
+@keyframes gwReveal {
+  from {
+    opacity: 0.45;
+    transform: translateY(10px);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
 }
 .gw-panel-title {
   display: flex;

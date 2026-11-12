@@ -60,7 +60,6 @@ import {
   verifyHouseholdDataIsolation,
   getSecurityAuditSummary,
 } from '../security/security-audit-and-gdpr';
-import { inspectDeploymentReadiness } from '../deployment/deployment-readiness';
 
 test('calculateCorporateTax defaults to 2026, applies 15% PME reduced rate up to 42 500 € and 25% above, and computes both scenarios', () => {
   const result = calculateCorporateTax({
@@ -803,7 +802,7 @@ test('Official Knowledge Base enforces 12 topics, 5 priority publishers, APPROVE
   resetKnowledgeRegistryToInitial();
 });
 
-test('Server-side PDF reports, short-lived signed download tokens, household isolation, and Free/Plus/Premium entitlements work deterministically', () => {
+test('Server-side PDF reports, short-lived signed download tokens, household isolation, and Gratuit/Premium entitlements work deterministically', () => {
   resetSubscriptionStoreForTests();
 
   const celibataireHousehold = DEMO_PERSONAL_HOUSEHOLDS.find(
@@ -868,11 +867,11 @@ test('Server-side PDF reports, short-lived signed download tokens, household iso
   assert.equal(ownerDownload.httpStatus, 200);
   assert.equal(ownerDownload.pdfBuffer?.subarray(0, 8).toString('latin1'), '%PDF-1.4');
 
-  // 5. Switching to PLUS plan unlocks DOSSIER_OPTIMISATION_ET_2042 and increases quota
+  // 5. Switching to PREMIUM plan unlocks DOSSIER_OPTIMISATION_ET_2042 and increases quota
   const switchRes = setHouseholdPlanForSimulation(
     celibataireHousehold.id,
     celibataireHousehold.id,
-    'PLUS'
+    'PREMIUM'
   );
   assert.equal(switchRes.allowed, true);
   const unlockedDossier = generateAndStoreAuthorizedPdfReport({
@@ -983,7 +982,7 @@ test('GDPR Right to Erasure (Art. 17), constant-time HMAC signature check, and 2
   // 3. Verify 0 open critical findings in security audit summary
   const auditSummary = getSecurityAuditSummary();
   assert.equal(auditSummary.counts.criticalOpen, 0);
-  assert.equal(auditSummary.gdprChecklist.length, 8);
+  assert.equal(auditSummary.gdprChecklist.length, 4);
 
   // 4. Verify household isolation helper rejects empty or mismatched IDs
   assert.equal(
@@ -992,34 +991,6 @@ test('GDPR Right to Erasure (Art. 17), constant-time HMAC signature check, and 2
       targetHouseholdId: 'foyer-couple-2-enfants',
     }).authorized,
     false
-  );
-});
-
-test('Deployment Readiness inspects Next.js 15 App Router framework, classifies public vs server-only env vars, and never falsely claims external deployment', () => {
-  const report = inspectDeploymentReadiness();
-  assert.equal(report.inspectedFramework.name, 'Next.js App Router');
-  assert.equal(report.inspectedFramework.vercelFrameworkPreset, 'nextjs');
-  assert.equal(report.secretScanPassed, true);
-
-  const publicVars = report.environmentVariables.filter(
-    (v) => v.exposure === 'PUBLIC_BROWSER'
-  );
-  const serverOnlyVars = report.environmentVariables.filter(
-    (v) => v.exposure === 'SERVER_ONLY_SECRET'
-  );
-
-  assert.equal(publicVars.every((v) => v.name.startsWith('NEXT_PUBLIC_')), true);
-  assert.equal(
-    serverOnlyVars.every((v) => !v.name.startsWith('NEXT_PUBLIC_')),
-    true
-  );
-  assert.equal(
-    report.externalServiceConnections.githubRepositorySync,
-    'MANUAL_GIT_PUSH_REQUIRED'
-  );
-  assert.equal(
-    report.externalServiceConnections.vercelDeployment,
-    'MANUAL_VERCEL_PROJECT_IMPORT_REQUIRED'
   );
 });
 

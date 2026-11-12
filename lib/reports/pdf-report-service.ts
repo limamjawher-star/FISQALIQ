@@ -82,6 +82,7 @@ interface StoredReportRecord {
 const globalForReports = globalThis as unknown as {
   __fiscaliqPrivateReportVault?: Map<string, StoredReportRecord>;
   __fiscaliqErasedHouseholds?: Set<string>;
+  __fiscaliqDevEphemeralSecret?: string;
 };
 
 const privateReportStorageVault =
@@ -92,9 +93,37 @@ const erasedHouseholdsSet =
   globalForReports.__fiscaliqErasedHouseholds ??
   (globalForReports.__fiscaliqErasedHouseholds = new Set<string>());
 
-const REPORT_SIGNING_SECRET =
-  process.env.FISCALIQ_REPORT_SIGNING_SECRET ||
-  'fiscaliq-private-storage-hmac-key-2026-server-only';
+export function getReportSigningSecret(): string {
+  const configured = process.env.FISCALIQ_REPORT_SIGNING_SECRET?.trim();
+  if (
+    configured &&
+    configured.length >= 32 &&
+    !configured.includes('replace-with')
+  ) {
+    return configured;
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'CRITICAL SECURITY ERROR: FISCALIQ_REPORT_SIGNING_SECRET is missing or shorter than 32 characters in production.'
+    );
+  }
+
+  if (!globalForReports.__fiscaliqDevEphemeralSecret) {
+    globalForReports.__fiscaliqDevEphemeralSecret = crypto
+      .randomBytes(32)
+      .toString('hex');
+  }
+  return globalForReports.__fiscaliqDevEphemeralSecret;
+}
+
+// Startup assertion in production runtime (excluding static build phase)
+if (
+  process.env.NODE_ENV === 'production' &&
+  process.env.NEXT_PHASE !== 'phase-production-build'
+) {
+  getReportSigningSecret();
+}
 
 function formatFrenchDate(iso: string): string {
   const d = new Date(iso);
@@ -673,7 +702,7 @@ export function issueSignedDownloadToken(params: {
   });
   const payloadB64 = Buffer.from(payload, 'utf8').toString('base64url');
   const signature = crypto
-    .createHmac('sha256', REPORT_SIGNING_SECRET)
+    .createHmac('sha256', getReportSigningSecret())
     .update(payloadB64)
     .digest('base64url');
 
@@ -715,7 +744,7 @@ export function verifySignedDownloadToken(params: {
   }
 
   const expectedSig = crypto
-    .createHmac('sha256', REPORT_SIGNING_SECRET)
+    .createHmac('sha256', getReportSigningSecret())
     .update(payloadB64)
     .digest('base64url');
 
@@ -786,9 +815,13 @@ function ensureSeededReportForHousehold(householdId: string): void {
   );
   if (hasExisting) return;
 
-  const targetHousehold =
+  const foundDemo =
     DEMO_PERSONAL_HOUSEHOLDS.find((h) => h.id === householdId) ||
     DEMO_PERSONAL_HOUSEHOLDS[0];
+  const targetHousehold: PersonalHouseholdProfile = {
+    ...foundDemo,
+    id: householdId,
+  };
 
   const baseMeta = buildStructuredPersonalTaxReport({
     household: targetHousehold,
@@ -882,7 +915,7 @@ export function listAuthorizedHouseholdReports(params: {
 /**
  * Génère un nouveau rapport PDF côté serveur après vérification stricte :
  * 1. De l'isolation par foyer (`authenticatedHouseholdId === household.id`)
- * 2. Des droits et quotas de l'abonnement (`FREE`, `PLUS`, `PREMIUM`)
+ * 2. Des droits et quotas de l'abonnement (`FREE`, `PREMIUM`)
  */
 export function generateAndStoreAuthorizedPdfReport(params: {
   authenticatedHouseholdId: string;

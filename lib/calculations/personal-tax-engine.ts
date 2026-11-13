@@ -3118,5 +3118,271 @@ export function simulateWithholdingTaxAndSituationChange(
   };
 }
 
+// ============================================================================
+// BARÈME KILOMÉTRIQUE OFFICIEL & CALCULATEUR DE FRAIS RÉELS (CGI Art. 83-3°)
+// ============================================================================
+
+export type FiscalHorsepowerRating = 3 | 4 | 5 | 6 | 7;
+
+export interface OfficialRealExpensesCalculatorInput {
+  taxYear?: SupportedTaxYear;
+  annualNetTaxableSalaryEur: number;
+  maritalStatus: FamilyMaritalStatus;
+  dependantsCount: number;
+  oneWayCommuteKm: number; // Plafonné à 40 km aller simple par défaut sauf circonstances justifiées
+  exceed40KmJustified?: boolean;
+  workedDaysOnSitePerYear: number; // ex: 160 à 218 jours
+  fiscalHorsepower: FiscalHorsepowerRating; // 3 CV à 7 CV et +
+  isElectricVehicle: boolean; // Bonus légal +20 %
+  mealsOnSiteWithoutCanteenDays: number;
+  deductibleMealGapPerDayEur?: number; // Déduction forfaitaire par repas (5.45 €)
+  teleworkDaysPerYear?: number; // Forfait 2.70 €/jour plafonné à 594 €/an
+  otherJustifiedProfessionalExpensesEur?: number;
+}
+
+export interface OfficialRealExpensesCalculatorResult {
+  effectiveOneWayKm: number;
+  annualCommuteDistanceKm: number;
+  mileageDeductionBaseEur: number;
+  electricBonusEur: number;
+  totalMileageDeductionEur: number;
+  mealsDeductionEur: number;
+  teleworkDeductionEur: number;
+  otherProfessionalExpensesEur: number;
+  totalComputedRealExpensesEur: number;
+  standard10PercentDeductionEur: number;
+  extraDeductionOver10PercentEur: number;
+  isRealExpensesAdvantageous: boolean;
+  taxWith10PercentEur: number;
+  taxWithRealExpensesEur: number;
+  annualTaxSavedEur: number;
+  formulaAppliedTextFr: string;
+  officialSourceUrl: string;
+  statutoryReference: string;
+}
+
+const CAR_MILEAGE_SCHEDULE: Record<
+  FiscalHorsepowerRating,
+  {
+    upTo5000Rate: number;
+    midRate: number;
+    midFixedEur: number;
+    over20000Rate: number;
+  }
+> = {
+  3: { upTo5000Rate: 0.529, midRate: 0.316, midFixedEur: 1065, over20000Rate: 0.37 },
+  4: { upTo5000Rate: 0.606, midRate: 0.34, midFixedEur: 1330, over20000Rate: 0.407 },
+  5: { upTo5000Rate: 0.636, midRate: 0.357, midFixedEur: 1395, over20000Rate: 0.427 },
+  6: { upTo5000Rate: 0.665, midRate: 0.374, midFixedEur: 1457, over20000Rate: 0.447 },
+  7: { upTo5000Rate: 0.697, midRate: 0.394, midFixedEur: 1515, over20000Rate: 0.47 },
+};
+
+export function calculateOfficialRealProfessionalExpenses(
+  input: OfficialRealExpensesCalculatorInput
+): OfficialRealExpensesCalculatorResult {
+  const taxYear = input.taxYear ?? 2026;
+  const rawOneWayKm = Math.max(0, Math.round(input.oneWayCommuteKm));
+  const effectiveOneWayKm = input.exceed40KmJustified
+    ? rawOneWayKm
+    : Math.min(40, rawOneWayKm);
+  const workedDays = Math.max(0, Math.min(260, Math.round(input.workedDaysOnSitePerYear)));
+
+  const annualCommuteDistanceKm = effectiveOneWayKm * 2 * workedDays;
+  const schedule = CAR_MILEAGE_SCHEDULE[input.fiscalHorsepower] || CAR_MILEAGE_SCHEDULE[5];
+
+  let mileageRaw = 0;
+  let formulaAppliedTextFr = '';
+
+  if (annualCommuteDistanceKm <= 0) {
+    mileageRaw = 0;
+    formulaAppliedTextFr = '0 km parcouru';
+  } else if (annualCommuteDistanceKm <= 5000) {
+    mileageRaw = annualCommuteDistanceKm * schedule.upTo5000Rate;
+    formulaAppliedTextFr = `${annualCommuteDistanceKm.toLocaleString('fr-FR')} km × ${schedule.upTo5000Rate.toLocaleString('fr-FR')} € (${input.fiscalHorsepower} CV)`;
+  } else if (annualCommuteDistanceKm <= 20000) {
+    mileageRaw =
+      annualCommuteDistanceKm * schedule.midRate + schedule.midFixedEur;
+    formulaAppliedTextFr = `(${annualCommuteDistanceKm.toLocaleString('fr-FR')} km × ${schedule.midRate.toLocaleString('fr-FR')} €) + ${schedule.midFixedEur.toLocaleString('fr-FR')} € (${input.fiscalHorsepower} CV)`;
+  } else {
+    mileageRaw = annualCommuteDistanceKm * schedule.over20000Rate;
+    formulaAppliedTextFr = `${annualCommuteDistanceKm.toLocaleString('fr-FR')} km × ${schedule.over20000Rate.toLocaleString('fr-FR')} € (${input.fiscalHorsepower} CV)`;
+  }
+
+  const mileageDeductionBaseEur = Math.round(mileageRaw);
+  const electricBonusEur = input.isElectricVehicle
+    ? Math.round(mileageRaw * 0.2)
+    : 0;
+  const totalMileageDeductionEur = mileageDeductionBaseEur + electricBonusEur;
+
+  const mealGap = input.deductibleMealGapPerDayEur ?? 5.45;
+  const mealDays = Math.max(
+    0,
+    Math.min(workedDays, Math.round(input.mealsOnSiteWithoutCanteenDays))
+  );
+  const mealsDeductionEur = Math.round(mealDays * mealGap);
+
+  const teleworkDays = Math.max(0, Math.min(230, Math.round(input.teleworkDaysPerYear ?? 0)));
+  const teleworkDeductionEur = Math.min(594, Math.round(teleworkDays * 2.7));
+
+  const otherProfessionalExpensesEur = Math.max(
+    0,
+    Math.round(input.otherJustifiedProfessionalExpensesEur ?? 0)
+  );
+
+  const totalComputedRealExpensesEur =
+    totalMileageDeductionEur +
+    mealsDeductionEur +
+    teleworkDeductionEur +
+    otherProfessionalExpensesEur;
+
+  const tax10Pct = calculatePersonalIncomeTax({
+    taxYear,
+    annualDeclaredIncomeEur: input.annualNetTaxableSalaryEur,
+    expenseDeductionMode: 'abattement_10',
+    maritalStatus: input.maritalStatus,
+    dependantsCount: input.dependantsCount,
+  });
+
+  const taxReal = calculatePersonalIncomeTax({
+    taxYear,
+    annualDeclaredIncomeEur: input.annualNetTaxableSalaryEur,
+    expenseDeductionMode: 'frais_reels',
+    realExpensesAmountEur: totalComputedRealExpensesEur,
+    maritalStatus: input.maritalStatus,
+    dependantsCount: input.dependantsCount,
+  });
+
+  const standard10PercentDeductionEur = tax10Pct.deductionAppliedEur;
+  const extraDeductionOver10PercentEur = Math.max(
+    0,
+    totalComputedRealExpensesEur - standard10PercentDeductionEur
+  );
+  const isRealExpensesAdvantageous =
+    totalComputedRealExpensesEur > standard10PercentDeductionEur;
+  const annualTaxSavedEur = Math.max(
+    0,
+    tax10Pct.finalEstimatedTaxEur - taxReal.finalEstimatedTaxEur
+  );
+
+  return {
+    effectiveOneWayKm,
+    annualCommuteDistanceKm,
+    mileageDeductionBaseEur,
+    electricBonusEur,
+    totalMileageDeductionEur,
+    mealsDeductionEur,
+    teleworkDeductionEur,
+    otherProfessionalExpensesEur,
+    totalComputedRealExpensesEur,
+    standard10PercentDeductionEur,
+    extraDeductionOver10PercentEur,
+    isRealExpensesAdvantageous,
+    taxWith10PercentEur: tax10Pct.finalEstimatedTaxEur,
+    taxWithRealExpensesEur: taxReal.finalEstimatedTaxEur,
+    annualTaxSavedEur,
+    formulaAppliedTextFr: input.isElectricVehicle
+      ? `${formulaAppliedTextFr} + 20 % véhicule électrique`
+      : formulaAppliedTextFr,
+    officialSourceUrl: 'https://www.service-public.fr/particuliers/vosdroits/F1989',
+    statutoryReference: 'CGI Art. 83-3° · BOI-BAREME-000001 (Cases 1AK / 1BK)',
+  };
+}
+
+export interface PerAndDonationArbitrageInput {
+  taxYear?: SupportedTaxYear;
+  annualNetTaxableIncomeEur: number;
+  maritalStatus: FamilyMaritalStatus;
+  dependantsCount: number;
+  plannedPerContributionEur: number;
+  availablePerCeilingEur?: number;
+  plannedDonation66PctEur: number;
+  plannedDonation75PctEur?: number;
+}
+
+export interface PerAndDonationArbitrageResult {
+  deductiblePerAppliedEur: number;
+  donationReductionAppliedEur: number;
+  taxBeforeActionEur: number;
+  taxAfterActionEur: number;
+  totalTaxSavedEur: number;
+  totalCashOutflowEur: number;
+  realNetEffortAfterTaxEur: number;
+  effectiveDiscountPercent: number;
+}
+
+export function calculatePerAndDonationTaxArbitrage(
+  input: PerAndDonationArbitrageInput
+): PerAndDonationArbitrageResult {
+  const taxYear = input.taxYear ?? 2026;
+  const defaultPerCeiling = Math.max(
+    4399,
+    Math.min(35194, Math.round(input.annualNetTaxableIncomeEur * 0.1))
+  );
+  const perCeiling = Math.max(0, input.availablePerCeilingEur ?? defaultPerCeiling);
+  const deductiblePerAppliedEur = Math.min(
+    perCeiling,
+    Math.max(0, Math.round(input.plannedPerContributionEur))
+  );
+
+  const baselineTax = calculatePersonalIncomeTax({
+    taxYear,
+    annualDeclaredIncomeEur: input.annualNetTaxableIncomeEur,
+    maritalStatus: input.maritalStatus,
+    dependantsCount: input.dependantsCount,
+    perDeductibleContributionEur: 0,
+  });
+
+  const taxAfterPer = calculatePersonalIncomeTax({
+    taxYear,
+    annualDeclaredIncomeEur: input.annualNetTaxableIncomeEur,
+    maritalStatus: input.maritalStatus,
+    dependantsCount: input.dependantsCount,
+    perDeductibleContributionEur: deductiblePerAppliedEur,
+  });
+
+  const dons75 = Math.min(1000, Math.max(0, Math.round(input.plannedDonation75PctEur ?? 0)));
+  const dons66Raw =
+    Math.max(0, Math.round(input.plannedDonation66PctEur)) +
+    Math.max(0, Math.round((input.plannedDonation75PctEur ?? 0) - 1000));
+  const max20PctIncome = Math.round(taxAfterPer.netTaxableIncomeEur * 0.2);
+  const dons66Eligible = Math.min(max20PctIncome, dons66Raw);
+
+  const rawDonationReduction =
+    Math.round(dons75 * 0.75) + Math.round(dons66Eligible * 0.66);
+  const donationReductionAppliedEur = Math.min(
+    taxAfterPer.finalEstimatedTaxEur,
+    rawDonationReduction
+  );
+
+  const taxBeforeActionEur = baselineTax.finalEstimatedTaxEur;
+  const taxAfterActionEur = Math.max(
+    0,
+    taxAfterPer.finalEstimatedTaxEur - donationReductionAppliedEur
+  );
+  const totalTaxSavedEur = Math.max(0, taxBeforeActionEur - taxAfterActionEur);
+
+  const totalCashOutflowEur =
+    deductiblePerAppliedEur +
+    Math.max(0, Math.round(input.plannedDonation66PctEur)) +
+    Math.max(0, Math.round(input.plannedDonation75PctEur ?? 0));
+  const realNetEffortAfterTaxEur = Math.max(0, totalCashOutflowEur - totalTaxSavedEur);
+  const effectiveDiscountPercent =
+    totalCashOutflowEur > 0
+      ? Math.round((totalTaxSavedEur / totalCashOutflowEur) * 100)
+      : 0;
+
+  return {
+    deductiblePerAppliedEur,
+    donationReductionAppliedEur,
+    taxBeforeActionEur,
+    taxAfterActionEur,
+    totalTaxSavedEur,
+    totalCashOutflowEur,
+    realNetEffortAfterTaxEur,
+    effectiveDiscountPercent,
+  };
+}
+
+
 
 

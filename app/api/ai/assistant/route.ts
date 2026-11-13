@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { GoogleGenAI } from '@google/genai';
 import {
   aiQuerySchema,
   personalTaxAssistantQuerySchema,
@@ -63,6 +64,75 @@ export async function POST(req: NextRequest) {
 
       const status =
         responsePayload.rateLimit && !responsePayload.rateLimit.allowed ? 429 : 200;
+
+      // Support real Gemini streaming when requested (`stream: true`) and GEMINI_API_KEY is configured
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
+      if (
+        body.stream === true &&
+        status === 200 &&
+        apiKey &&
+        apiKey !== 'MY_GEMINI_API_KEY' &&
+        apiKey.length > 10
+      ) {
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: {
+            headers: {
+              'User-Agent': 'aistudio-build',
+            },
+          },
+        });
+        const streamPrompt = `Tu es l'assistant fiscal français de FISCALIQ. Formule une réponse claire et concise en français simple (phrases courtes) à la question : "${personalParsed.data.question}". Appuie-toi strictement sur cette synthèse vérifiée sans modifier aucun montant ni inventer de source :\n\n${responsePayload.answerMarkdown}`;
+
+        const geminiStream = await ai.models.generateContentStream({
+          model: 'gemini-4-hydrogen',
+          contents: streamPrompt,
+        });
+
+        const encoder = new TextEncoder();
+        const readable = new ReadableStream({
+          async start(controller) {
+            try {
+              for await (const chunk of geminiStream) {
+                if (chunk.text) {
+                  controller.enqueue(
+                    encoder.encode(`data: ${JSON.stringify({ text: chunk.text })}\n\n`)
+                  );
+                }
+              }
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    done: true,
+                    citations: responsePayload.citations,
+                    rateLimit: responsePayload.rateLimit,
+                  })}\n\n`
+                )
+              );
+            } catch {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    text: responsePayload.answerMarkdown,
+                    done: true,
+                  })}\n\n`
+                )
+              );
+            } finally {
+              controller.close();
+            }
+          },
+        });
+
+        return new Response(readable, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'private, no-store, max-age=0',
+            Connection: 'keep-alive',
+          },
+        });
+      }
 
       return NextResponse.json(
         {

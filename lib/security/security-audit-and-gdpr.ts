@@ -449,7 +449,6 @@ export const SECURITY_AUDIT_FINDINGS_REGISTRY: SecurityAuditFinding[] = [
       'app/api/reports/route.ts',
       'app/api/reports/download/route.ts',
       'app/api/security-audit/route.ts',
-      'app/api/tax-assistant/route.ts',
       'app/api/ai/assistant/route.ts',
     ],
   },

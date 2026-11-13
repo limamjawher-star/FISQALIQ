@@ -994,13 +994,249 @@ test('GDPR Right to Erasure (Art. 17), constant-time HMAC signature check, and 2
   );
 });
 
+test('Phase 5 Legal Verification: 2026 & 2025 brackets, quotient familial cap, décote thresholds, and 10% deduction bounds match official sources', async () => {
+  const { PERSONAL_TAX_PARAMETERS_2026, PERSONAL_TAX_PARAMETERS_2025 } = await import(
+    './personal-tax-engine'
+  );
 
+  // Source: https://www.service-public.fr/particuliers/vosdroits/F1419 & CGI Art. 197
+  assert.equal(
+    PERSONAL_TAX_PARAMETERS_2026.officialSourceUrl,
+    'https://www.service-public.fr/particuliers/vosdroits/F1419'
+  );
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.brackets.length, 5);
+  assert.deepEqual(
+    PERSONAL_TAX_PARAMETERS_2026.brackets.map((b) => ({
+      min: b.minEur,
+      max: b.maxEur,
+      rate: b.rate,
+    })),
+    [
+      { min: 0, max: 11600, rate: 0 },
+      { min: 11600, max: 29579, rate: 0.11 },
+      { min: 29579, max: 84577, rate: 0.3 },
+      { min: 84577, max: 181917, rate: 0.41 },
+      { min: 181917, max: null, rate: 0.45 },
+    ]
+  );
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.quotientCapPerHalfPartEur, 1807);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.decoteSingleThresholdEur, 1982);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.decoteSingleLumpSumEur, 897);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.decoteCoupleThresholdEur, 3277);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.decoteCoupleLumpSumEur, 1483);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.decoteRate, 0.4525);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.deduction10PercentFloorEur, 509);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.deduction10PercentCeilingEur, 14555);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2026.minimumCollectionThresholdEur, 61);
 
+  // 2025 official schedule (Revenus 2024 - Loi de finances 2025, CGI Art. 197)
+  assert.deepEqual(
+    PERSONAL_TAX_PARAMETERS_2025.brackets.map((b) => ({
+      min: b.minEur,
+      max: b.maxEur,
+      rate: b.rate,
+    })),
+    [
+      { min: 0, max: 11497, rate: 0 },
+      { min: 11497, max: 29315, rate: 0.11 },
+      { min: 29315, max: 83823, rate: 0.3 },
+      { min: 83823, max: 180294, rate: 0.41 },
+      { min: 180294, max: null, rate: 0.45 },
+    ]
+  );
+  assert.equal(PERSONAL_TAX_PARAMETERS_2025.quotientCapPerHalfPartEur, 1791);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2025.decoteSingleThresholdEur, 1964);
+  assert.equal(PERSONAL_TAX_PARAMETERS_2025.decoteCoupleThresholdEur, 3248);
+});
 
+test('Phase 2, 3 & 4 Verification: Signed session tokens isolate users and Stripe webhook signature (t=...,v1=...) upgrades and downgrades subscriptions', async () => {
+  const cryptoMod = await import('crypto');
+  const { verifyAndApplyStripeWebhook, getOrCreateHouseholdSubscription } =
+    await import('../subscriptions/entitlements');
+  const { issueSignedSessionToken, verifySignedSessionToken } = await import(
+    '../security/session-auth'
+  );
 
+  // 1. Signed session tokens isolate user A from user B and reject tampering
+  const tokenUserA = issueSignedSessionToken({
+    householdId: 'user-uuid-alice',
+    role: 'user',
+    ttlSeconds: 3600,
+  });
+  const verifiedA = verifySignedSessionToken(tokenUserA);
+  assert.equal(verifiedA.valid, true);
+  assert.equal(verifiedA.householdId, 'user-uuid-alice');
+  assert.notEqual(verifiedA.householdId, 'user-uuid-bob');
 
+  const tamperedSession = verifySignedSessionToken(`${tokenUserA}tampered`);
+  assert.equal(tamperedSession.valid, false);
 
+  // 2. Stripe webhook signature verification (`t=...,v1=...`)
+  const prevSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const testWebhookSecret = 'whsec_test_stripe_secret_key_for_unit_tests_2026';
+  process.env.STRIPE_WEBHOOK_SECRET = testWebhookSecret;
 
+  try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const upgradePayload = JSON.stringify({
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          client_reference_id: 'user-uuid-alice',
+        },
+      },
+    });
+    const validUpgradeSig = cryptoMod
+      .createHmac('sha256', testWebhookSecret)
+      .update(`${nowSec}.${upgradePayload}`)
+      .digest('hex');
 
+    const upgradeRes = verifyAndApplyStripeWebhook({
+      rawBody: upgradePayload,
+      stripeSignatureHeader: `t=${nowSec},v1=${validUpgradeSig}`,
+    });
+    assert.equal(upgradeRes.allowed, true);
+    assert.equal(upgradeRes.httpStatus, 200);
+    assert.equal(upgradeRes.usage.planId, 'PREMIUM');
+    assert.equal(getOrCreateHouseholdSubscription('user-uuid-alice').planId, 'PREMIUM');
+
+    // Forged signature is rejected with 403
+    const forgedRes = verifyAndApplyStripeWebhook({
+      rawBody: upgradePayload,
+      stripeSignatureHeader: `t=${nowSec},v1=deadbeef00000000000000000000000000000000000000000000000000000000`,
+    });
+    assert.equal(forgedRes.allowed, false);
+    assert.equal(forgedRes.httpStatus, 403);
+
+    // Cancellation downgrades user back to FREE
+    const cancelPayload = JSON.stringify({
+      type: 'customer.subscription.deleted',
+      data: {
+        object: {
+          metadata: { householdId: 'user-uuid-alice' },
+        },
+      },
+    });
+    const validCancelSig = cryptoMod
+      .createHmac('sha256', testWebhookSecret)
+      .update(`${nowSec}.${cancelPayload}`)
+      .digest('hex');
+
+    const cancelRes = verifyAndApplyStripeWebhook({
+      rawBody: cancelPayload,
+      stripeSignatureHeader: `t=${nowSec},v1=${validCancelSig}`,
+    });
+    assert.equal(cancelRes.allowed, true);
+    assert.equal(cancelRes.httpStatus, 200);
+    assert.equal(cancelRes.usage.planId, 'FREE');
+    assert.equal(getOrCreateHouseholdSubscription('user-uuid-alice').planId, 'FREE');
+  } finally {
+    if (prevSecret === undefined) {
+      delete process.env.STRIPE_WEBHOOK_SECRET;
+    } else {
+      process.env.STRIPE_WEBHOOK_SECRET = prevSecret;
+    }
+  }
+});
+
+test('Official Barème Kilométrique 2026 + Frais de Repas + Télétravail calculator and PER/Dons tax arbitrage compute exact deterministic savings', async () => {
+  const {
+    calculateOfficialRealProfessionalExpenses,
+    calculatePerAndDonationTaxArbitrage,
+  } = await import('./personal-tax-engine');
+
+  // 1. 5 CV car, 30 km one-way (60 km/day) * 210 days = 12 600 km/year (falls in 5001..20000 bracket: d * 0.357 + 1395)
+  // Plus 200 meals outside home without canteen (200 * 5.45 € = 1 090 €)
+  // Compare against a 36 000 € salary (10% flat deduction = 3 600 €)
+  const kmResult = calculateOfficialRealProfessionalExpenses({
+    taxYear: 2026,
+    annualNetTaxableSalaryEur: 36000,
+    maritalStatus: 'celibataire',
+    dependantsCount: 0,
+    oneWayCommuteKm: 30,
+    exceed40KmJustified: false,
+    workedDaysOnSitePerYear: 210,
+    fiscalHorsepower: 5,
+    isElectricVehicle: false,
+    mealsOnSiteWithoutCanteenDays: 200,
+    teleworkDaysPerYear: 0,
+    otherJustifiedProfessionalExpensesEur: 0,
+  });
+
+  assert.equal(kmResult.effectiveOneWayKm, 30);
+  assert.equal(kmResult.annualCommuteDistanceKm, 12600);
+  // 12600 * 0.357 + 1395 = 4498.2 + 1395 = 5893 €
+  assert.equal(kmResult.totalMileageDeductionEur, 5893);
+  assert.equal(kmResult.mealsDeductionEur, 1090);
+  assert.equal(kmResult.totalComputedRealExpensesEur, 6983);
+  assert.equal(kmResult.standard10PercentDeductionEur, 3600);
+  assert.equal(kmResult.isRealExpensesAdvantageous, true);
+  assert.equal(kmResult.extraDeductionOver10PercentEur, 3383);
+  assert.equal(kmResult.annualTaxSavedEur > 0, true);
+
+  // Electric vehicle (+20% bonus) & 40 km cap when exceed40KmJustified is false
+  const evCapped = calculateOfficialRealProfessionalExpenses({
+    taxYear: 2026,
+    annualNetTaxableSalaryEur: 36000,
+    maritalStatus: 'celibataire',
+    dependantsCount: 0,
+    oneWayCommuteKm: 55, // Should cap at 40 km one-way
+    exceed40KmJustified: false,
+    workedDaysOnSitePerYear: 100,
+    fiscalHorsepower: 4,
+    isElectricVehicle: true,
+    mealsOnSiteWithoutCanteenDays: 0,
+    teleworkDaysPerYear: 50,
+    otherJustifiedProfessionalExpensesEur: 0,
+  });
+  assert.equal(evCapped.effectiveOneWayKm, 40);
+  assert.equal(evCapped.electricBonusEur > 0, true);
+  assert.equal(evCapped.teleworkDeductionEur, 135); // 50 * 2.70 €
+
+  // 2. PER & Donations arbitrage: 2 000 € PER + 500 € donation (66%) at 30% marginal bracket
+  const arb = calculatePerAndDonationTaxArbitrage({
+    taxYear: 2026,
+    annualNetTaxableIncomeEur: 52000,
+    maritalStatus: 'celibataire',
+    dependantsCount: 0,
+    plannedPerContributionEur: 2000,
+    availablePerCeilingEur: 4500,
+    plannedDonation66PctEur: 500,
+    plannedDonation75PctEur: 0,
+  });
+
+  assert.equal(arb.deductiblePerAppliedEur, 2000);
+  assert.equal(arb.donationReductionAppliedEur, 330); // 66% of 500 €
+  assert.equal(arb.totalTaxSavedEur, 930); // 600 € PER + 330 € donation
+  assert.equal(arb.realNetEffortAfterTaxEur, 1570); // 2 500 € - 930 €
+});
+
+test('Automatic Avis d’impôt & Fiche de paie Scanner redacts sensitive PII (SPI, NIR, IBAN) and extracts 1AJ, 6NS, PAS, and Quotient Parts', async () => {
+  const { parseFiscalDocumentTextDeterministically } = await import(
+    '../ai/document-scanner'
+  );
+
+  const rawTextWithSensitivePii = `
+    AVIS D'IMPÔT 2026 — IMPÔT SUR LES REVENUS
+    Numéro fiscal : 12 34 56 78 90 123
+    NIR : 1 85 05 75 112 234 56
+    IBAN : FR76 3000 6000 0112 3456 7890 189
+    Nombre de parts : 1,5
+    Salaires nets imposables (1AJ) : 39 800 €
+    Retenue à la source déjà prélevée : 2 640 €
+    Taux de prélèvement à la source : 6,6 %
+    Plafond épargne retraite disponible (6NS) : 4 120 €
+  `;
+
+  const scanRes = parseFiscalDocumentTextDeterministically(rawTextWithSensitivePii);
+
+  assert.equal(scanRes.documentTypeDetected, 'AVIS_IMPOT');
+  assert.equal(scanRes.annualNetTaxableSalaryEur, 39800);
+  assert.equal(scanRes.availablePerCeilingEur, 4120);
+  assert.equal(scanRes.withheldPasAnnualEur, 2640);
+  assert.equal(scanRes.withholdingRatePercent, 6.6);
+  assert.equal(scanRes.familyQuotientParts, 1.5);
+  assert.equal(scanRes.redactedPiiCount >= 3, true);
+});
 
 

@@ -43,6 +43,19 @@ export function getSupabaseIntegrationStatus(): SupabaseEnvironmentStatus {
   };
 }
 
+export function getSupabasePublicConfig(): {
+  isConfigured: boolean;
+  url: string | null;
+  anonKey: string | null;
+} {
+  const status = getSupabaseIntegrationStatus();
+  return {
+    isConfigured: status.isConfigured,
+    url: status.hasPublicUrl ? process.env.NEXT_PUBLIC_SUPABASE_URL || null : null,
+    anonKey: status.hasAnonKey ? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || null : null,
+  };
+}
+
 /**
  * Reference PostgreSQL DDL & Row-Level Security (RLS) blueprint for production deployment
  * on Supabase PostgreSQL. Enforces strict multi-tenant company isolation.

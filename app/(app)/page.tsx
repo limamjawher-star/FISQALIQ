@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useMemo } from 'react';
-import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useFiscaliq } from '@/components/providers/fiscaliq-provider';
 import { AnimatedNumber } from '@/components/ui/interactive-primitives';
 import {
@@ -14,17 +14,28 @@ import {
   CreditCard,
   ArrowUpRight,
   ArrowRight,
+  Check,
 } from 'lucide-react';
 
 export default function HomePage() {
-  const { updateActiveHousehold } = useFiscaliq();
+  const router = useRouter();
+  const { activeHousehold, saveUserProfile } = useFiscaliq();
 
-  // Interactive quick state (all numbers computed strictly from these user inputs)
-  const [annualSalary, setAnnualSalary] = useState<number>(48000);
-  const [maritalStatus, setMaritalStatus] = useState<FamilyMaritalStatus>('celibataire');
-  const [childrenCount, setChildrenCount] = useState<number>(0);
+  // Interactive quick state initialized from user profile if already set, else 36 000 €
+  const [annualSalary, setAnnualSalary] = useState<number>(
+    activeHousehold.annualDeclaredSalaryNetImposableEur > 0
+      ? activeHousehold.annualDeclaredSalaryNetImposableEur
+      : 36000
+  );
+  const [maritalStatus, setMaritalStatus] = useState<FamilyMaritalStatus>(
+    activeHousehold.maritalStatus
+  );
+  const [childrenCount, setChildrenCount] = useState<number>(
+    activeHousehold.dependantsCount
+  );
   const [deductionMode, setDeductionMode] = useState<'abattement_10' | 'frais_reels'>('abattement_10');
-  const [realExpensesAnnual, setRealExpensesAnnual] = useState<number>(6400);
+  const [realExpensesAnnual, setRealExpensesAnnual] = useState<number>(5200);
+  const [appliedFeedback, setAppliedFeedback] = useState(false);
 
   const computedParts = useMemo(
     () =>
@@ -50,6 +61,27 @@ export default function HomePage() {
     [annualSalary, deductionMode, realExpensesAnnual, maritalStatus, childrenCount]
   );
 
+  const syncSliderToProfile = () => {
+    const statusLabel =
+      maritalStatus === 'marie_pacse'
+        ? 'Couple marié / pacsé'
+        : maritalStatus === 'parent_isole'
+        ? 'Parent isolé'
+        : 'Célibataire';
+    saveUserProfile({
+      annualDeclaredSalaryNetImposableEur: annualSalary,
+      grossMonthlySalaryEur: Math.round(annualSalary / 9.4),
+      maritalStatus,
+      dependantsCount: childrenCount,
+      situationSummary: `${statusLabel} · ${childrenCount} enfant(s) (${computedParts.toLocaleString('fr-FR')} part${computedParts > 1 ? 's' : ''})`,
+    });
+  };
+
+  const handleStartWithCurrentValues = () => {
+    syncSliderToProfile();
+    router.push('/onboarding');
+  };
+
   return (
     <>
       {/* 1. Headline + one sentence + one main button "Commencer" */}
@@ -62,10 +94,14 @@ export default function HomePage() {
           </p>
         </div>
         <div className="gw-heading-action">
-          <Link href="/onboarding" className="gw-button">
+          <button
+            type="button"
+            onClick={handleStartWithCurrentValues}
+            className="gw-button"
+          >
             <span>Commencer</span>
             <ArrowRight size={14} aria-hidden="true" />
-          </Link>
+          </button>
         </div>
       </div>
 
@@ -99,11 +135,12 @@ export default function HomePage() {
           <div className="mt-4 pt-3 border-t border-black/10 space-y-2.5 text-xs">
             <div>
               <div className="flex justify-between mb-1">
-                <span className="text-[#384238]">Revenu net / an</span>
+                <span className="text-[#384238]">Revenu net imposable / an</span>
                 <strong className="font-mono">{annualSalary.toLocaleString('fr-FR')} €</strong>
               </div>
               <input
                 type="range"
+                aria-label="Revenu net imposable par an"
                 min={12000}
                 max={160000}
                 step={1000}
@@ -171,6 +208,7 @@ export default function HomePage() {
                 </div>
                 <input
                   type="range"
+                  aria-label="Frais réels annuels"
                   min={1000}
                   max={20000}
                   step={250}
@@ -195,17 +233,19 @@ export default function HomePage() {
             </div>
             <button
               type="button"
-              title="Appliquer au tableau de bord"
-              onClick={() =>
-                updateActiveHousehold({
-                  annualDeclaredSalaryNetImposableEur: annualSalary,
-                  maritalStatus,
-                  dependantsCount: childrenCount,
-                  estimatedEligibleTaxCreditsEur: 0,
-                })
-              }
+              aria-label="Appliquer ce salaire à mon profil"
+              title="Appliquer ce salaire à mon profil"
+              onClick={() => {
+                syncSliderToProfile();
+                setAppliedFeedback(true);
+                setTimeout(() => setAppliedFeedback(false), 2000);
+              }}
             >
-              <ArrowUpRight size={20} aria-hidden="true" />
+              {appliedFeedback ? (
+                <Check size={18} className="text-[#326b54]" aria-hidden="true" />
+              ) : (
+                <ArrowUpRight size={20} aria-hidden="true" />
+              )}
             </button>
           </div>
         </section>
@@ -218,4 +258,3 @@ export default function HomePage() {
     </>
   );
 }
-

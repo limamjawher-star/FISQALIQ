@@ -60,13 +60,8 @@ const nextConfig: NextConfig = {
         permanent: true,
       },
       {
-        source: '/login',
-        destination: '/onboarding',
-        permanent: false,
-      },
-      {
         source: '/signup',
-        destination: '/onboarding',
+        destination: '/login',
         permanent: false,
       },
     ];
@@ -91,6 +86,10 @@ const nextConfig: NextConfig = {
           {
             key: 'X-DNS-Prefetch-Control',
             value: 'off',
+          },
+          {
+            key: 'Strict-Transport-Security',
+            value: 'max-age=63072000; includeSubDomains; preload',
           },
           {
             key: 'Permissions-Policy',

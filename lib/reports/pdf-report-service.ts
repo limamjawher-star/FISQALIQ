@@ -117,12 +117,33 @@ export function getReportSigningSecret(): string {
   return globalForReports.__fiscaliqDevEphemeralSecret;
 }
 
+export function verifyProductionStartupEnv(): void {
+  getReportSigningSecret();
+  if (process.env.NODE_ENV === 'production') {
+    const missing: string[] = [];
+    if (!process.env.GEMINI_API_KEY?.trim()) {
+      missing.push('GEMINI_API_KEY');
+    }
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()) {
+      missing.push('NEXT_PUBLIC_SUPABASE_URL');
+    }
+    if (!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()) {
+      missing.push('NEXT_PUBLIC_SUPABASE_ANON_KEY');
+    }
+    if (missing.length > 0) {
+      throw new Error(
+        `CRITICAL SECURITY ERROR: Missing required production environment variables: ${missing.join(', ')}`
+      );
+    }
+  }
+}
+
 // Startup assertion in production runtime (excluding static build phase)
 if (
   process.env.NODE_ENV === 'production' &&
   process.env.NEXT_PHASE !== 'phase-production-build'
 ) {
-  getReportSigningSecret();
+  verifyProductionStartupEnv();
 }
 
 function formatFrenchDate(iso: string): string {
@@ -368,9 +389,9 @@ export function buildStructuredPersonalTaxReport(params: {
       'Les cotisations salariales du simulateur de paie reposent sur les taux légaux de droit commun hors mutuelle d’entreprise ou convention collective spécifique.',
     ],
     methodologySummary:
-      'Toutes les valeurs chiffrées de ce rapport sont calculées côté serveur par le moteur arithmétique déterministe de FISCALIQ (aucun calcul arithmétique n’est délégué à un modèle d’IA). Les références juridiques proviennent exclusivement des sources officielles au statut APPROVED_VERIFIED.',
+      'Toutes les valeurs chiffrées de ce rapport sont calculées côté serveur selon le barème officiel du Code général des impôts. Les références juridiques proviennent exclusivement des sources officielles vérifiées.',
     limitationsDisclaimer:
-      'AVERTISSEMENT IMPORTANT : Ce rapport est un document personnel d’information et d’aide à la préparation déclarative édité par FISCALIQ. Il ne constitue ni un avis d’impôt officiel de la DGFiP, ni une consultation juridique opposable. Toute démarche officielle (déclaration 2042, modulation de taux de prélèvement à la source) s’effectue exclusivement sur votre espace personnel impots.gouv.fr.',
+      'Estimation indicative, non contractuelle. Ce rapport est un document personnel d’information et d’aide à la préparation déclarative édité par FISCALIQ. Il ne constitue ni un avis d’impôt officiel de la DGFiP, ni une consultation juridique opposable. Toute démarche officielle s’effectue sur impots.gouv.fr.',
     sections,
     officialReferences,
   };
@@ -471,7 +492,7 @@ export function renderPersonalReportToPdfBuffer(
     currentCommands.push(
       'BT /F1 7.5 Tf 40 26 Td (' +
         encodePdfWinAnsiString(
-          `Document d'aide a la decision FISCALIQ (${report.reportId}) - Ne remplace pas l'avis d'impot officiel impots.gouv.fr`
+          `Estimation indicative, non contractuelle (${report.reportId}) - Ne remplace pas l'avis d'impot officiel impots.gouv.fr`
         ) +
         ') Tj ET'
     );

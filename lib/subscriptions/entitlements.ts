@@ -317,6 +317,144 @@ export function applyVerifiedPaymentWebhook(params: {
 }
 
 /**
+ * Verifies a standard Stripe webhook (`Stripe-Signature: t=...,v1=...`) using
+ * `STRIPE_WEBHOOK_SECRET` (or `FISCALIQ_PAYMENT_WEBHOOK_SECRET`) and updates
+ * the household subscription on `checkout.session.completed` (PREMIUM) or
+ * `customer.subscription.deleted` (FREE).
+ */
+export function verifyAndApplyStripeWebhook(params: {
+  rawBody: string;
+  stripeSignatureHeader: string;
+  toleranceSeconds?: number;
+}): EntitlementCheckResult {
+  const secret = (
+    process.env.STRIPE_WEBHOOK_SECRET ||
+    process.env.FISCALIQ_PAYMENT_WEBHOOK_SECRET ||
+    ''
+  ).trim();
+
+  if (!secret || secret.length < 16 || secret.includes('replace-with')) {
+    const fallbackUsage = getOrCreateHouseholdSubscription('unknown');
+    return {
+      allowed: false,
+      httpStatus: 403,
+      reasonCode: 'PLAN_FEATURE_RESTRICTED',
+      messageFr:
+        'Webhook Stripe refusé (403) : STRIPE_WEBHOOK_SECRET non configuré côté serveur.',
+      planConfig: SUBSCRIPTION_PLANS_CONFIG[fallbackUsage.planId],
+      usage: fallbackUsage,
+    };
+  }
+
+  const parts = (params.stripeSignatureHeader || '').split(',');
+  let timestampStr = '';
+  let signatureHex = '';
+  for (const part of parts) {
+    const [k, v] = part.trim().split('=');
+    if (k === 't' && v) timestampStr = v;
+    if (k === 'v1' && v) signatureHex = v;
+  }
+
+  if (!timestampStr || !signatureHex) {
+    const fallbackUsage = getOrCreateHouseholdSubscription('unknown');
+    return {
+      allowed: false,
+      httpStatus: 403,
+      reasonCode: 'PLAN_FEATURE_RESTRICTED',
+      messageFr: 'Webhook Stripe refusé (403) : en-tête Stripe-Signature manquant ou malformé.',
+      planConfig: SUBSCRIPTION_PLANS_CONFIG[fallbackUsage.planId],
+      usage: fallbackUsage,
+    };
+  }
+
+  const timestampSec = Number(timestampStr);
+  const tolerance = params.toleranceSeconds ?? 300;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (
+    !Number.isFinite(timestampSec) ||
+    Math.abs(nowSec - timestampSec) > tolerance
+  ) {
+    const fallbackUsage = getOrCreateHouseholdSubscription('unknown');
+    return {
+      allowed: false,
+      httpStatus: 403,
+      reasonCode: 'PLAN_FEATURE_RESTRICTED',
+      messageFr: 'Webhook Stripe refusé (403) : horodatage Stripe-Signature expiré.',
+      planConfig: SUBSCRIPTION_PLANS_CONFIG[fallbackUsage.planId],
+      usage: fallbackUsage,
+    };
+  }
+
+  const signedPayload = `${timestampStr}.${params.rawBody}`;
+  const expectedSig = crypto
+    .createHmac('sha256', secret)
+    .update(signedPayload)
+    .digest('hex');
+
+  const sigA = Buffer.from(signatureHex, 'utf8');
+  const sigB = Buffer.from(expectedSig, 'utf8');
+  if (sigA.length !== sigB.length || !crypto.timingSafeEqual(sigA, sigB)) {
+    const fallbackUsage = getOrCreateHouseholdSubscription('unknown');
+    return {
+      allowed: false,
+      httpStatus: 403,
+      reasonCode: 'PLAN_FEATURE_RESTRICTED',
+      messageFr: 'Webhook Stripe refusé (403) : signature HMAC-SHA256 invalide.',
+      planConfig: SUBSCRIPTION_PLANS_CONFIG[fallbackUsage.planId],
+      usage: fallbackUsage,
+    };
+  }
+
+  const event = JSON.parse(params.rawBody) as {
+    type?: string;
+    data?: {
+      object?: {
+        client_reference_id?: string;
+        metadata?: { householdId?: string };
+      };
+    };
+  };
+
+  const householdId = String(
+    event.data?.object?.client_reference_id ||
+      event.data?.object?.metadata?.householdId ||
+      ''
+  ).trim();
+
+  if (!householdId) {
+    const fallbackUsage = getOrCreateHouseholdSubscription('unknown');
+    return {
+      allowed: false,
+      httpStatus: 403,
+      reasonCode: 'UNAUTHORIZED_HOUSEHOLD_ISOLATION',
+      messageFr: 'Webhook Stripe refusé : identifiant de foyer absent de l’événement.',
+      planConfig: SUBSCRIPTION_PLANS_CONFIG[fallbackUsage.planId],
+      usage: fallbackUsage,
+    };
+  }
+
+  const newPlanId: SubscriptionPlanId =
+    event.type === 'customer.subscription.deleted' ? 'FREE' : 'PREMIUM';
+
+  const current = getOrCreateHouseholdSubscription(householdId);
+  const updated: HouseholdUsageSnapshot = {
+    ...current,
+    planId: newPlanId,
+    updatedAtIso: new Date().toISOString(),
+  };
+  sharedStoreSetJson(subKey(householdId), updated);
+
+  return {
+    allowed: true,
+    httpStatus: 200,
+    reasonCode: 'ALLOWED',
+    messageFr: `Abonnement Stripe mis à jour (${event.type}) : ${SUBSCRIPTION_PLANS_CONFIG[newPlanId].nameFr}.`,
+    planConfig: SUBSCRIPTION_PLANS_CONFIG[newPlanId],
+    usage: updated,
+  };
+}
+
+/**
  * Test-only helper disabled in production.
  * In production, plan changes only happen via `applyVerifiedPaymentWebhook`.
  */

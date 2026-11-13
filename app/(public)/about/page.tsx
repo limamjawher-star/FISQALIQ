@@ -6,24 +6,24 @@ import { ShieldCheck, Calculator, Lock, ArrowRight } from 'lucide-react';
 
 export const metadata: Metadata = {
   title: 'À propos — FISCALIQ',
-  description: 'Moteur fiscal déterministe 2026 & interface claire.',
+  description: 'Simulateur fiscal 2026 en français simple.',
 };
 
 const PILLARS = [
   {
     icon: Calculator,
-    title: 'Calcul déterministe 2026',
-    desc: '100 % des calculs reposent sur le barème officiel du CGI (parts, décote, TMI, PAS).',
+    title: 'Barème officiel 2026',
+    desc: 'Tous les calculs appliquent les règles officielles (parts, décote, tranches et prélèvement à la source).',
   },
   {
     icon: ShieldCheck,
     title: 'Sources publiques vérifiées',
-    desc: 'Références directes impots.gouv.fr, service-public.fr, BOFiP et Légifrance.',
+    desc: 'Références directes vers impots.gouv.fr, service-public.fr, BOFiP et Légifrance.',
   },
   {
     icon: Lock,
     title: 'Confidentialité & RGPD',
-    desc: 'Isolation stricte par foyer fiscal et zéro revente de données personnelles.',
+    desc: 'Protection de vos données personnelles et aucun partage commercial.',
   },
 ];
 

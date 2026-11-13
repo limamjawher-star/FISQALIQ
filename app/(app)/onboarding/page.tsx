@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { AppShell } from '@/components/layout/app-shell';
 import { useFiscaliq } from '@/components/providers/fiscaliq-provider';
 import { PageTransition } from '@/components/ui/interactive-primitives';
+import { DocumentScannerModal } from '@/components/declaration/document-scanner-modal';
 import {
   PersonalTaxOnboardingState,
   OnboardingHouseholdStatus,
@@ -23,7 +24,7 @@ import { Step4Income } from '@/components/onboarding/step-4-income';
 import { Step5Expenses } from '@/components/onboarding/step-5-expenses';
 import { Step6TaxNotice } from '@/components/onboarding/step-6-tax-notice';
 import { Step7Summary } from '@/components/onboarding/step-7-summary';
-import { CheckCircle2, ArrowRight, ArrowLeft } from 'lucide-react';
+import { CheckCircle2, ArrowRight, ArrowLeft, Sparkles } from 'lucide-react';
 
 interface WizardStepMeta {
   stepNumber: number;
@@ -147,17 +148,33 @@ function createWizardStateFromHousehold(
 }
 
 export default function PersonalTaxOnboardingPage() {
+  const { activeHousehold } = useFiscaliq();
+  const profileSyncKey = `${activeHousehold.id}-${activeHousehold.annualDeclaredSalaryNetImposableEur}-${activeHousehold.maritalStatus}-${activeHousehold.dependantsCount}`;
+  return <PersonalTaxOnboardingContent key={profileSyncKey} />;
+}
+
+function PersonalTaxOnboardingContent() {
   const router = useRouter();
   const {
+    activeHousehold,
     userHousehold,
     saveUserProfile,
     savePersonalSimulation,
     clearUserData,
   } = useFiscaliq();
 
-  const [currentStep, setCurrentStep] = useState<number>(1);
+  const [currentStep, setCurrentStep] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('autostart') === '1') {
+        return 7;
+      }
+    }
+    return 1;
+  });
+  const [scannerOpen, setScannerOpen] = useState<boolean>(false);
   const [wizardState, setWizardState] = useState<PersonalTaxOnboardingState>(() =>
-    createWizardStateFromHousehold(userHousehold)
+    createWizardStateFromHousehold(activeHousehold)
   );
 
   const evaluation = useMemo(() => {
@@ -206,7 +223,6 @@ export default function PersonalTaxOnboardingPage() {
       'fr-FR'
     )} part${evaluation.quotient.totalParts > 1 ? 's' : ''})`;
 
-    // Always creates/updates the user's own profile (never overwrites demo households)
     saveUserProfile({
       householdName: wizardState.profileLabel || 'Mon foyer',
       situationSummary: summaryText,
@@ -250,32 +266,71 @@ export default function PersonalTaxOnboardingPage() {
 
   return (
     <AppShell title="Mon impôt">
-      <div className="space-y-6">
+      <DocumentScannerModal
+        isOpen={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onApplyExtractedValues={(scanned) => {
+          setWizardState((prev) => ({
+            ...prev,
+            incomes: {
+              ...prev.incomes,
+              salaires: {
+                selected: true,
+                annualAmountEur:
+                  scanned.annualNetTaxableSalaryEur ??
+                  prev.incomes.salaires.annualAmountEur,
+                amountUnknownOrSkipped: false,
+              },
+            },
+            availablePerCeilingEur:
+              scanned.availablePerCeilingEur ?? prev.availablePerCeilingEur,
+            currentWithholdingRatePct:
+              scanned.withholdingRatePercent ?? prev.currentWithholdingRatePct,
+            taxAlreadyWithheldOrPaidEur:
+              scanned.withheldPasAnnualEur ?? prev.taxAlreadyWithheldOrPaidEur,
+          }));
+          setCurrentStep(7);
+        }}
+      />
+
+      <div className="space-y-4">
         {/* Progression : "Étape X sur 7" affiché une seule fois */}
         <section
           aria-label="Progression du simulateur"
-          className="bg-white border border-slate-200/90 rounded-lg p-5 shadow-xs space-y-4"
+          className="gw-panel p-5 space-y-4"
         >
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-mono font-semibold text-emerald-700">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-mono font-semibold text-[#326b54]">
               Étape {currentStep} sur {WIZARD_STEPS.length}
             </span>
-            <button
-              type="button"
-              onClick={() => {
-                clearUserData();
-                setWizardState(createWizardStateFromHousehold(EMPTY_USER_HOUSEHOLD));
-                setCurrentStep(1);
-              }}
-              className="text-[11px] font-medium text-slate-500 hover:text-rose-700 transition-colors"
-            >
-              Effacer mes données
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setScannerOpen(true)}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#326b54] hover:underline"
+              >
+                <Sparkles size={13} />
+                <span>Remplir avec mon avis d’impôt</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  clearUserData();
+                  setWizardState(
+                    createWizardStateFromHousehold(EMPTY_USER_HOUSEHOLD)
+                  );
+                  setCurrentStep(1);
+                }}
+                className="text-[11px] font-medium text-[#384238] hover:underline"
+              >
+                Effacer mes données
+              </button>
+            </div>
           </div>
 
-          <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+          <div className="w-full h-2 bg-black/10 rounded-full overflow-hidden">
             <div
-              className="h-full bg-emerald-500 transition-all duration-300"
+              className="h-full bg-[#326b54] transition-all duration-300"
               style={{ width: `${progressPercent}%` }}
             />
           </div>
@@ -289,19 +344,19 @@ export default function PersonalTaxOnboardingPage() {
                   key={st.stepNumber}
                   type="button"
                   onClick={() => setCurrentStep(st.stepNumber)}
-                  className={`px-2.5 py-2 rounded-md text-left border transition-colors flex items-center justify-between gap-1.5 ${
+                  className={`px-2.5 py-2 rounded-xl text-left border transition-colors flex items-center justify-between gap-1.5 ${
                     isCurrent
-                      ? 'bg-[#10B981] text-white border-[#10B981] shadow-xs'
+                      ? 'bg-[#326b54] text-white border-[#326b54]'
                       : isDone
-                      ? 'bg-emerald-50/70 text-emerald-950 border-emerald-200 hover:bg-emerald-100/70'
-                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                      ? 'bg-[#dce9da]/80 text-[#242b27] border-[#326b54]/30'
+                      : 'bg-white/70 text-[#384238] border-black/10 hover:bg-white'
                   }`}
                 >
                   <span className="text-[11px] font-semibold truncate">
                     {st.shortTitle}
                   </span>
                   {isDone && (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <CheckCircle2 className="w-3.5 h-3.5 text-[#326b54] shrink-0" />
                   )}
                 </button>
               );
@@ -310,7 +365,7 @@ export default function PersonalTaxOnboardingPage() {
         </section>
 
         {/* Étape active */}
-        <div className="bg-white border border-slate-200/90 rounded-lg p-6 shadow-xs space-y-6">
+        <div className="gw-panel p-6 space-y-6">
           <PageTransition transitionKey={`onboarding-step-${currentStep}`}>
             {currentStep === 1 && (
               <Step1Residency
@@ -360,12 +415,12 @@ export default function PersonalTaxOnboardingPage() {
           </PageTransition>
 
           {/* Navigation bas de carte */}
-          <div className="pt-4 border-t border-slate-200 flex items-center justify-between gap-3">
+          <div className="pt-4 border-t border-black/10 flex items-center justify-between gap-3">
             <button
               type="button"
               disabled={currentStep === 1}
               onClick={() => setCurrentStep((prev) => Math.max(1, prev - 1))}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md text-xs font-semibold border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-black/15 bg-white/85 text-[#242b27] hover:bg-white disabled:opacity-40"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
               Précédent
@@ -377,10 +432,10 @@ export default function PersonalTaxOnboardingPage() {
                 onClick={() =>
                   setCurrentStep((prev) => Math.min(WIZARD_STEPS.length, prev + 1))
                 }
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold bg-[#10B981] text-white hover:bg-[#059669] shadow-xs"
+                className="gw-button"
               >
-                Continuer
-                <ArrowRight className="w-3.5 h-3.5 text-white" />
+                <span>Continuer</span>
+                <ArrowRight className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
